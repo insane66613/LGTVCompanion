@@ -808,3 +808,27 @@ The following endpoints are used to query information from WebOS devices, using 
 ```
 "LGTV Companion.exe" -settings_options {\"quickStartMode\":\"on\"} device1
 ```
+
+## Samsung SmartThings commands (LGTV Companion and LGTVcli)
+- *-smartthings_on [device_id]* 	- turn on a SmartThings device
+- *-smartthings_off [device_id]* 	- turn off a SmartThings device
+- *-smartthings_status [device_id]* 	- get the status of a SmartThings device
+- *-smartthings_set [device_id] [property] [value]* 	- set a property of a SmartThings device
+
+#### Examples: 
+*Turn on a SmartThings device with device ID "device1"*
+```
+"LGTV Companion.exe" -smartthings_on device1
+```
+*Turn off a SmartThings device with device ID "device1"*
+```
+"LGTV Companion.exe" -smartthings_off device1
+```
+*Get the status of a SmartThings device with device ID "device1"*
+```
+"LGTV Companion.exe" -smartthings_status device1
+```
+*Set a property of a SmartThings device with device ID "device1"*
+```
+"LGTV Companion.exe" -smartthings_set device1 property value
+```

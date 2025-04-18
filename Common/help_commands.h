@@ -130,4 +130,10 @@ Commands are case-insensitive, but JSON typically is case-sensitive.
 -settings_picture [payload]                     send a JSON payload with settings for the "picture" category 
 -settings_other [payload]                       send a JSON payload with settings for the "other" category
 -settings_options [payload]                     send a JSON payload with settings for the "options" category
+
+## Samsung SmartThings commands ##
+-smartthings_on [device_id]                     turn on a SmartThings device
+-smartthings_off [device_id]                    turn off a SmartThings device
+-smartthings_status [device_id]                 get the status of a SmartThings device
+-smartthings_set [device_id] [property] [value] set a property of a SmartThings device
 )"

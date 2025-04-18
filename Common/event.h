@@ -33,6 +33,7 @@
 #define EVENT_BUTTON									63	
 #define EVENT_LUNA_DEVICEINFO							64	
 #define EVENT_LUNA_GENERIC								65	
+#define EVENT_SMARTTHINGS								66
 
 #define EVENT_SHUTDOWN_TYPE_UNDEFINED					90
 #define EVENT_SHUTDOWN_TYPE_SHUTDOWN					91
@@ -51,6 +52,7 @@ private:
 	std::string						log_message_;
 	std::string						createRequest(std::string ep, std::string payload = "", bool = false);
 	std::string						createLunaPayload(std::string, std::string);
+	std::string						createSmartThingsRequest(std::string smartthings_event);
 
 public:
 	Event() {};

@@ -91,6 +91,11 @@ void Event::set(int type, std::vector<std::string> devices, std::string arg_1, s
 		log_message_ = arg_3;
 		break;
 
+	case EVENT_SMARTTHINGS: // arg_1 = smartthings_event, arg_2 = log_message
+		data_ = createSmartThingsRequest(arg_1);
+		log_message_ = arg_2;
+		break;
+
 	default:break;
 	}
 }
@@ -139,5 +144,11 @@ std::string Event::createLunaPayload(std::string luna, std::string param)
 	payload["buttons"].push_back(button);
 	payload["onclose"] = req;
 	payload["onfail"] = req;
+	return payload.dump();
+}
+std::string Event::createSmartThingsRequest(std::string smartthings_event)
+{
+	json payload;
+	payload["event"] = smartthings_event;
 	return payload.dump();
 }

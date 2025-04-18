@@ -61,6 +61,8 @@ using			json = nlohmann::json;
 #define			JSON_DEVICE_MAC					"MAC"
 #define			JSON_DEVICE_PERSISTENT			"PersistentConnectionLevel"
 #define			JSON_DEVICE_LUID				"NicLuid"
+#define         JSON_SMARTTHINGS_DEVICE_ID      "SmartThingsDeviceID"
+#define         JSON_SMARTTHINGS_ACCESS_TOKEN   "SmartThingsAccessToken"
 
 Preferences::Preferences(std::wstring configuration_file_name)
 {
@@ -443,6 +445,10 @@ Preferences::Preferences(std::wstring configuration_file_name)
 						device.extra.timeout = power_on_timeout_;
 						device.extra.log_level = log_level_;
 						device.extra.user_idle_mode_mute_speakers = user_idle_mode_mute_speakers_;
+						if (item.value()[JSON_SMARTTHINGS_DEVICE_ID].is_string())
+							device.smartthings_device_id = item.value()[JSON_SMARTTHINGS_DEVICE_ID].get<std::string>();
+						if (item.value()[JSON_SMARTTHINGS_ACCESS_TOKEN].is_string())
+							device.smartthings_access_token = item.value()[JSON_SMARTTHINGS_ACCESS_TOKEN].get<std::string>();
 						devices_.push_back(device);
 					}
 				}
@@ -586,6 +592,11 @@ bool Preferences::Preferences::writeToDisk(void)
 
 		for (auto& m : item.mac_addresses)
 			prefs[id][JSON_DEVICE_MAC].push_back(m);
+
+		if (item.smartthings_device_id != "")
+			prefs[id][JSON_SMARTTHINGS_DEVICE_ID] = item.smartthings_device_id;
+		if (item.smartthings_access_token != "")
+			prefs[id][JSON_SMARTTHINGS_ACCESS_TOKEN] = item.smartthings_access_token;
 
 		deviceid++;
 	}

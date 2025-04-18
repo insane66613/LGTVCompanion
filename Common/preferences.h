@@ -67,6 +67,8 @@ public:
 	std::vector<Device>					devices_;
 	nlohmann::json						lg_api_commands_json;
 	std::string							lg_api_buttons;
+	std::string							smartthings_device_id; // Samsung SmartThings device ID
+	std::string							smartthings_access_token; // Samsung SmartThings access token
 
 	bool								writeToDisk(void);
 	std::string							getAsString(void);
@@ -75,4 +77,3 @@ public:
 	Preferences(std::wstring configuration_file_name);
 	~Preferences() {};
 };
-

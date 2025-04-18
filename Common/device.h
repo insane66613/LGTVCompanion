@@ -20,6 +20,8 @@ struct DeviceAdditionalConf
 	int									log_level;
 	std::string							data_path;
 	int									timeout;
+	std::string							smartthings_device_id; // Samsung SmartThings device ID
+	std::string							smartthings_access_token; // Samsung SmartThings access token
 };
 // Properties, configuration and default values for a webOS device
 struct Device {							
@@ -41,4 +43,6 @@ struct Device {
 	int									persistent_connection_level = PERSISTENT_CONNECTION_OFF;
 	uint64_t							network_interface_luid = 0;
 	DeviceAdditionalConf				extra;
+	std::string							smartthings_device_id; // Samsung SmartThings device ID
+	std::string							smartthings_access_token; // Samsung SmartThings access token
 };
