@@ -3,7 +3,6 @@
 #include <memory>
 #include <string>
 
-
 #define			LOG_LEVEL_OFF			0
 #define			LOG_LEVEL_INFO			1
 #define			LOG_LEVEL_WARNING		2
@@ -14,15 +13,15 @@
 class Logging : public std::enable_shared_from_this<Logging>
 {
 private:
-	class Impl;
-	std::shared_ptr<Impl> pimpl; //Pointer to IMPLementation
+class Impl;
+std::shared_ptr<Impl> pimpl; // Pointer to IMPLementation
 
 public:
-	Logging(int log_level, std::wstring log_file);
-	~Logging() {};
-	void info(std::string id, std::string message, std::string arg_1 = "", std::string arg_2 = "", std::string arg_3 = "", std::string arg_4 = "");
-	void warning(std::string id, std::string message, std::string arg_1 = "", std::string arg_2 = "", std::string arg_3 = "", std::string arg_4 = "");
-	void error(std::string id, std::string message, std::string arg_1 = "", std::string arg_2 = "", std::string arg_3 = "", std::string arg_4 = "");
-	void debug(std::string id, std::string message, std::string arg_1 = "", std::string arg_2 = "", std::string arg_3 = "", std::string arg_4 = "");
+Logging(int log_level, std::wstring log_file);
+~Logging() {};
+void info(std::string id, std::string message, std::string arg_1 = "", std::string arg_2 = "", std::string arg_3 = "", std::string arg_4 = "");
+void warning(std::string id, std::string message, std::string arg_1 = "", std::string arg_2 = "", std::string arg_3 = "", std::string arg_4 = "");
+void error(std::string id, std::string message, std::string arg_1 = "", std::string arg_2 = "", std::string arg_3 = "", std::string arg_4 = "");
+void debug(std::string id, std::string message, std::string arg_1 = "", std::string arg_2 = "", std::string arg_3 = "", std::string arg_4 = "");
+void logSmartThingsOperation(std::string id, std::string device_id, std::string access_token, std::string operation, std::string message);
 };
-
