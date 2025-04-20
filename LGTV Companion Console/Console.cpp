@@ -10,6 +10,7 @@
 #include "../Common/common_app_define.h"
 #include "../Common/tools.h"
 #include "../Common/event.h"
+#include "../Common/log.h"
 #include <iostream>
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
@@ -1123,7 +1124,6 @@ nlohmann::json SendRequest(Device device, nlohmann::json request, bool isLuna)
 
 			// parse the response
 			j = nlohmann::json::parse(static_cast<const char*>(buffer.data().data()), static_cast<const char*>(buffer.data().data()) + buffer.size());
-			buffer.consume(buffer.size());
 
 			type = j["type"];
 
@@ -1731,6 +1731,72 @@ std::string helpText(void)
 	std::string ver = "v ";
 	ver += tools::narrow(APP_VERSION);
 	tools::replaceAllInPlace(response, "%%VER%%", ver);
+	return response;
+}
+nlohmann::json SendSmartThingsRequest(Device device, std::string payload)
+{
+	nlohmann::json response;
+	if (device.smartthings_access_token == "" || device.smartthings_device_id == "")
+	{
+		response["error"] = "No SmartThings access token or device ID. Check the device configuration in LGTV Companion UI";
+		return response;
+	}
+	else
+	{
+		try
+		{
+			std::string host = "api.smartthings.com";
+			std::string target = "/v1/devices/" + device.smartthings_device_id + "/commands";
+			std::string token = "Bearer " + device.smartthings_access_token;
+
+			net::io_context ioc;
+			tcp::resolver resolver{ ioc };
+			ssl::context ctx{ ssl::context::tlsv12_client };
+			ssl::stream<tcp::socket> stream{ ioc, ctx };
+
+			if (!SSL_set_tlsext_host_name(stream.native_handle(), host.c_str()))
+			{
+				response["error"] = "Failed to set SNI Hostname";
+				return response;
+			}
+
+			auto const results = resolver.resolve(host, "https");
+			net::connect(stream.next_layer(), results.begin(), results.end());
+			stream.handshake(ssl::stream_base::client);
+
+			http::request<http::string_body> req{ http::verb::post, target, 11 };
+			req.set(http::field::host, host);
+			req.set(http::field::authorization, token);
+			req.set(http::field::content_type, "application/json");
+			req.body() = payload;
+			req.prepare_payload();
+
+			http::write(stream, req);
+
+			beast::flat_buffer buffer;
+			http::response<http::dynamic_body> res;
+			http::read(stream, buffer, res);
+
+			response = nlohmann::json::parse(beast::buffers_to_string(res.body().data()));
+
+			boost::system::error_code ec;
+			stream.shutdown(ec);
+			if (ec == net::error::eof)
+			{
+				ec.assign(0, ec.category());
+			}
+			if (ec)
+			{
+				response["error"] = "Shutdown failed: " + ec.message();
+			}
+		}
+		catch (std::exception const& e)
+		{
+			std::stringstream s;
+			s << "exception: " << e.what();
+			response["error"] = s.str();
+		}
+	}
 	return response;
 }
 nlohmann::json SendSmartThingsRequest(Device device, std::string payload)

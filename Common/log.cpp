@@ -180,3 +180,8 @@ void Logging::error(std::string id, std::string message, std::string arg_1, std:
 	if (pimpl->log_level_ == LOG_LEVEL_INFO || pimpl->log_level_ == LOG_LEVEL_WARNING || pimpl->log_level_ == LOG_LEVEL_ERROR || pimpl->log_level_ == LOG_LEVEL_DEBUG)
 		pimpl->writeToDisk(LOG_ERROR, id, pimpl->parseMessage(message, arg_1, arg_2, arg_3, arg_4));
 }
+void Logging::logSmartThingsOperation(std::string id, std::string device_id, std::string access_token, std::string operation, std::string message)
+{
+	std::string log_message = "SmartThings Operation: " + operation + ", Device ID: " + device_id + ", Access Token: " + access_token + ", Message: " + message;
+	pimpl->writeToDisk(LOG_INFO, id, log_message);
+}

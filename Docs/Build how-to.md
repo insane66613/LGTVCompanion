@@ -14,6 +14,7 @@ Alternatively, You can manually install the dependencies, with the following com
 		vcpkg install wintoast:x64-windows-static
 		vcpkg install openssl:x64-windows-static
   		vcpkg install phnt:x64-windows-static
+		vcpkg install smartthings-cli:x64-windows-static
     
   		vcpkg install nlohmann-json:arm64-windows-static
 		vcpkg install boost-asio:arm64-windows-static
@@ -21,6 +22,7 @@ Alternatively, You can manually install the dependencies, with the following com
 		vcpkg install wintoast:arm64-windows-static
 		vcpkg install openssl:arm64-windows-static
   		vcpkg install phnt:arm64-windows-static
+		vcpkg install smartthings-cli:arm64-windows-static
 
 ### Building the setup package
 To build the setup package please ensure that the [Heatwave](https://www.firegiant.com/docs/heatwave/) for VS2022 extension is installed.
