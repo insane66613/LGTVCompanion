@@ -3,10 +3,11 @@
 using namespace std::chrono_literals;
 
 void SamsungController::observePowerState(SamsungPowerState state) noexcept {
+    // PowerState=pictureoff proves the TV is powered with its panel blanked, but
+    // it does not prove that this process still knows the Accessibility menu is
+    // open. Preserve menu knowledge separately so process-restart recovery can
+    // safely reopen Accessibility before toggling the first item.
     power_state_ = state;
-    if (state == SamsungPowerState::PictureOff) {
-        accessibility_state_ = SamsungAccessibilityState::OpenEnabled;
-    }
 }
 
 void SamsungController::assumeAccessibilityState(SamsungAccessibilityState state) noexcept {

@@ -1,10 +1,13 @@
 #include "../LGTV Companion Service/idle_coordinator.h"
 #include "../LGTV Companion Service/samsung_controller.h"
 #include "../LGTV Companion Service/vizio_controller.h"
+#include "../LGTV Companion Service/device_coordinator_core.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -143,6 +146,66 @@ void test_vizio_blank_is_distinct_from_poweroff() {
     check(controller.planExtendedIdle() == VizioAction::PowerOff, "extended idle must power Vizio off");
 }
 
+void test_pictureoff_does_not_invent_menu_open_after_restart() {
+    SamsungController controller;
+    controller.observePowerState(SamsungPowerState::PictureOff);
+    check(controller.accessibilityState() == SamsungAccessibilityState::Unknown,
+          "pictureoff alone must not prove Accessibility menu is open");
+}
+
+bool contains_action(const DevicePlan& plan, DeviceAction action) {
+    for (const auto candidate : plan.actions) {
+        if (candidate == action) return true;
+    }
+    return false;
+}
+
+void test_device_coordinator_maps_idle_and_busy() {
+    DeviceCoordinatorCore core(60min, true);
+    const auto t0 = Clock::time_point{} + 5min;
+    const auto first = core.onEvent(DeviceLifecycleEvent::UserIdle, t0);
+    check(contains_action(first, DeviceAction::SamsungEnableScreenOff), "idle must blank Samsung");
+    check(contains_action(first, DeviceAction::VizioBlankPanel), "idle must blank Vizio");
+    check(first.deadline_changed, "first idle must arm deadline");
+    check(first.deadline == std::optional<Clock::time_point>{t0 + 60min}, "first idle deadline must be fixed");
+
+    const auto repeated = core.onEvent(DeviceLifecycleEvent::UserIdle, t0 + 10min);
+    check(!repeated.deadline_changed, "repeated idle must not change deadline");
+    check(repeated.deadline == first.deadline, "repeated idle must preserve original deadline");
+
+    const auto busy = core.onEvent(DeviceLifecycleEvent::UserBusy, t0 + 20min);
+    check(contains_action(busy, DeviceAction::SamsungRestoreScreenOff), "busy must restore Samsung");
+    check(contains_action(busy, DeviceAction::VizioWake), "busy must wake/unblank Vizio");
+    check(!busy.deadline.has_value(), "busy must cancel deadline");
+}
+
+void test_device_coordinator_extended_idle_orders_samsung_restore_before_poweroff() {
+    DeviceCoordinatorCore core(60min, true);
+    const auto t0 = Clock::time_point{};
+    core.onEvent(DeviceLifecycleEvent::UserIdle, t0);
+    const auto plan = core.onDeadline(t0 + 60min);
+    check(contains_action(plan, DeviceAction::VizioPowerOff), "extended idle must power Vizio off");
+    auto restore = std::find(plan.actions.begin(), plan.actions.end(), DeviceAction::SamsungRestoreScreenOff);
+    auto poweroff = std::find(plan.actions.begin(), plan.actions.end(), DeviceAction::SamsungPowerOff);
+    check(restore != plan.actions.end() && poweroff != plan.actions.end() && restore < poweroff,
+          "extended idle must disable Samsung Screen Off Mode before KEY_POWER off");
+}
+
+void test_device_coordinator_topology_safe_displayoff_and_shutdown() {
+    DeviceCoordinatorCore core(60min, true);
+    const auto t0 = Clock::time_point{};
+    const auto displayoff = core.onEvent(DeviceLifecycleEvent::DisplayOff, t0);
+    check(contains_action(displayoff, DeviceAction::SamsungEnableScreenOff), "topology-safe display off must panel-blank Samsung");
+    check(!contains_action(displayoff, DeviceAction::SamsungPowerOff), "topology-safe display off must not power Samsung off");
+    check(!contains_action(displayoff, DeviceAction::VizioPowerOff), "topology-safe display off must not power Vizio off");
+
+    const auto shutdown = core.onEvent(DeviceLifecycleEvent::Shutdown, t0 + 1min);
+    check(contains_action(shutdown, DeviceAction::SamsungRestoreScreenOff), "shutdown must first restore persistent Samsung mode");
+    check(contains_action(shutdown, DeviceAction::SamsungPowerOff), "shutdown must power Samsung off");
+    check(contains_action(shutdown, DeviceAction::VizioPowerOff), "shutdown must power Vizio off");
+    check(!shutdown.deadline.has_value(), "shutdown must cancel extended idle deadline");
+}
+
 }  // namespace
 
 int main() {
@@ -156,6 +219,10 @@ int main() {
     test_samsung_restart_safe_unknown_menu_restore();
     test_samsung_power_toggle_is_state_guarded();
     test_vizio_blank_is_distinct_from_poweroff();
+    test_pictureoff_does_not_invent_menu_open_after_restart();
+    test_device_coordinator_maps_idle_and_busy();
+    test_device_coordinator_extended_idle_orders_samsung_restore_before_poweroff();
+    test_device_coordinator_topology_safe_displayoff_and_shutdown();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return EXIT_FAILURE;
