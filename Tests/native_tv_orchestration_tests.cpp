@@ -111,14 +111,32 @@ void test_samsung_restore_open_awake_menu() {
                "awake known-open restore must ENTER then RETURN");
 }
 
-void test_samsung_restore_pictureoff_preserves_selection() {
+void test_samsung_restore_pictureoff_reopens_accessibility_before_disable() {
     SamsungController controller;
+    controller.observePowerState(SamsungPowerState::On);
+    controller.assumeAccessibilityState(SamsungAccessibilityState::OpenEnabled);
+    controller.observePowerState(SamsungPowerState::PictureOff);
+    check(controller.accessibilityState() == SamsungAccessibilityState::Unknown,
+          "pictureoff must invalidate cached Accessibility-menu-open state");
+    const auto plan = controller.planDisableScreenOff();
+    check_keys(plan, {SamsungRemoteKey::Enter, SamsungRemoteKey::Accessibility,
+                      SamsungRemoteKey::Enter, SamsungRemoteKey::Return},
+               "pictureoff restore must wake, explicitly reopen Accessibility, disable first item, and close");
+    check(plan[0].delay_after == 1200ms, "pictureoff wake must wait 1200ms");
+    check(plan[1].delay_after == 1400ms, "pictureoff restore must wait after reopening Accessibility");
+}
+
+void test_samsung_external_pictureoff_to_on_invalidates_cached_menu_state() {
+    SamsungController controller;
+    controller.observePowerState(SamsungPowerState::On);
+    controller.assumeAccessibilityState(SamsungAccessibilityState::OpenEnabled);
     controller.observePowerState(SamsungPowerState::PictureOff);
     controller.assumeAccessibilityState(SamsungAccessibilityState::OpenEnabled);
-    const auto plan = controller.planDisableScreenOff();
-    check_keys(plan, {SamsungRemoteKey::Enter, SamsungRemoteKey::Enter, SamsungRemoteKey::Return},
-               "pictureoff known-open restore must wake with ENTER and preserve first item");
-    check(plan[0].delay_after == 1200ms, "pictureoff wake must wait 1200ms");
+    controller.observePowerState(SamsungPowerState::On);
+    check(controller.accessibilityState() == SamsungAccessibilityState::Unknown,
+          "externally observed pictureoff-to-on transition must invalidate cached menu state");
+    check(controller.planDisableScreenOff().empty(),
+          "awake TV with externally invalidated menu state must not blindly toggle Screen Off Mode");
 }
 
 void test_samsung_restart_safe_unknown_menu_restore() {
@@ -338,7 +356,8 @@ int main() {
     test_samsung_idle_when_already_pictureoff_is_noop();
     test_samsung_enable_leaves_accessibility_open();
     test_samsung_restore_open_awake_menu();
-    test_samsung_restore_pictureoff_preserves_selection();
+    test_samsung_restore_pictureoff_reopens_accessibility_before_disable();
+    test_samsung_external_pictureoff_to_on_invalidates_cached_menu_state();
     test_samsung_restart_safe_unknown_menu_restore();
     test_samsung_power_toggle_is_state_guarded();
     test_samsung_channel_authorization_frames();
