@@ -23,6 +23,7 @@ DevicePlan DeviceCoordinatorCore::restoreActive() {
     plan.deadline_changed = idle_.onBusy();
     plan.deadline = idle_.deadline();
     plan.actions = {
+        DeviceAction::SamsungPowerOn,
         DeviceAction::SamsungRestoreScreenOff,
         DeviceAction::VizioWake,
     };

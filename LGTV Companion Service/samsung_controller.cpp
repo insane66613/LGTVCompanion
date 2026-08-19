@@ -23,7 +23,11 @@ bool SamsungController::isBlanked(SamsungPowerState state) noexcept {
 }
 
 std::vector<SamsungCommandStep> SamsungController::planEnableScreenOff() {
-    if (!isPowered(power_state_) || accessibility_state_ == SamsungAccessibilityState::OpenEnabled) {
+    // pictureoff is direct evidence that persistent Screen Off Mode is already
+    // active. Never toggle it again merely because this process does not know
+    // whether the Accessibility menu itself is still open after a restart.
+    if (!isPowered(power_state_) || power_state_ == SamsungPowerState::PictureOff ||
+        accessibility_state_ == SamsungAccessibilityState::OpenEnabled) {
         return {};
     }
     accessibility_state_ = SamsungAccessibilityState::OpenEnabled;
@@ -35,6 +39,14 @@ std::vector<SamsungCommandStep> SamsungController::planEnableScreenOff() {
 
 std::vector<SamsungCommandStep> SamsungController::planDisableScreenOff() {
     if (!isPowered(power_state_) || accessibility_state_ == SamsungAccessibilityState::ClosedDisabled) {
+        return {};
+    }
+    // On a fresh process start, an ordinary awake TV does not establish that
+    // persistent Screen Off Mode is enabled. Do not blindly reopen Accessibility
+    // and risk enabling it. PictureOff is the restart-safe evidence that a
+    // selection-preserving reconciliation is required.
+    if (power_state_ == SamsungPowerState::On &&
+        accessibility_state_ == SamsungAccessibilityState::Unknown) {
         return {};
     }
 

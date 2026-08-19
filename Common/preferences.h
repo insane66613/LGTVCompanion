@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <nlohmann/json.hpp>
 #include "../Common/device.h"
+#include "../Common/external_tv_settings.h"
 
 #define PREFS_SHUTDOWN_TIMING_DEFAULT		0
 #define PREFS_SHUTDOWN_TIMING_EARLY			1
@@ -68,6 +69,7 @@ public:
 	bool								external_api_support_ = false;
 	int									shutdown_timing_ = PREFS_SHUTDOWN_TIMING_DEFAULT;
 	std::string							data_path_;
+	ExternalTvSettings					external_tv_;
 	std::vector<Device>					devices_;
 	nlohmann::json						lg_api_commands_json;
 	std::string							lg_api_buttons;

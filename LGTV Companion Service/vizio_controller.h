@@ -16,6 +16,8 @@ enum class VizioAction {
 
 class VizioController {
 public:
+    static VizioPowerState fromSmartCastPowerValue(int value) noexcept;
+
     void observeState(VizioPowerState power, bool blanked) noexcept;
 
     VizioAction planIdleBlank() const noexcept;

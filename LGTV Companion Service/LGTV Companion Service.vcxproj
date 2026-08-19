@@ -239,20 +239,29 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\Common\event.cpp" />
+    <ClCompile Include="..\Common\external_tv_settings.cpp" />
     <ClCompile Include="..\Common\ipc_v2.cpp" />
     <ClCompile Include="..\Common\log.cpp" />
     <ClCompile Include="..\Common\preferences.cpp" />
     <ClCompile Include="..\Common\tools.cpp" />
     <ClCompile Include="button_client.cpp" />
     <ClCompile Include="companion.cpp" />
+    <ClCompile Include="device_coordinator.cpp" />
+    <ClCompile Include="device_coordinator_core.cpp" />
+    <ClCompile Include="external_tv_transport.cpp" />
+    <ClCompile Include="idle_coordinator.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="samsung_controller.cpp" />
     <ClCompile Include="transient_arp.cpp" />
+    <ClCompile Include="vizio_controller.cpp" />
     <ClCompile Include="web_os_client.cpp" />
+    <ClCompile Include="windows_display_power_policy.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\Common\common_app_define.h" />
     <ClInclude Include="..\Common\device.h" />
     <ClInclude Include="..\Common\event.h" />
+    <ClInclude Include="..\Common\external_tv_settings.h" />
     <ClInclude Include="..\Common\ipc_v2.h" />
     <ClInclude Include="..\Common\lg_api.h" />
     <ClInclude Include="..\Common\lg_api_buttons.h" />
@@ -263,10 +272,17 @@
     <ClInclude Include="..\Common\tools.h" />
     <ClInclude Include="button_client.h" />
     <ClInclude Include="companion.h" />
+    <ClInclude Include="device_coordinator.h" />
+    <ClInclude Include="device_coordinator_core.h" />
+    <ClInclude Include="external_tv_transport.h" />
+    <ClInclude Include="idle_coordinator.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="main.h" />
+    <ClInclude Include="samsung_controller.h" />
     <ClInclude Include="transient_arp.h" />
+    <ClInclude Include="vizio_controller.h" />
     <ClInclude Include="web_os_client.h" />
+    <ClInclude Include="windows_display_power_policy.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="LGTV Companion Service.rc" />

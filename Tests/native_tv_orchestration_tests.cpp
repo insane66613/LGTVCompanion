@@ -2,6 +2,7 @@
 #include "../LGTV Companion Service/samsung_controller.h"
 #include "../LGTV Companion Service/vizio_controller.h"
 #include "../LGTV Companion Service/device_coordinator_core.h"
+#include "../Common/external_tv_settings.h"
 
 #include <algorithm>
 #include <chrono>
@@ -83,6 +84,13 @@ void test_samsung_pictureoff_is_powered_and_blanked() {
     check(!SamsungController::isPowered(SamsungPowerState::Standby), "standby must not count as powered");
 }
 
+void test_samsung_idle_when_already_pictureoff_is_noop() {
+    SamsungController controller;
+    controller.observePowerState(SamsungPowerState::PictureOff);
+    check(controller.planEnableScreenOff().empty(),
+          "idle while already pictureoff must not toggle persistent Screen Off Mode");
+}
+
 void test_samsung_enable_leaves_accessibility_open() {
     SamsungController controller;
     controller.observePowerState(SamsungPowerState::On);
@@ -127,6 +135,7 @@ void test_samsung_restart_safe_unknown_menu_restore() {
 void test_samsung_power_toggle_is_state_guarded() {
     SamsungController controller;
     controller.observePowerState(SamsungPowerState::On);
+    check(controller.planDisableScreenOff().empty(), "awake unknown restart state must not blindly toggle Accessibility");
     check(controller.shouldSendPowerToggleForOff(), "on -> off may send KEY_POWER");
     controller.observePowerState(SamsungPowerState::PictureOff);
     check(controller.shouldSendPowerToggleForOff(), "pictureoff -> off may send KEY_POWER");
@@ -144,6 +153,15 @@ void test_vizio_blank_is_distinct_from_poweroff() {
     controller.observeState(VizioPowerState::On, true);
     check(controller.planIdleBlank() == VizioAction::None, "repeated idle must not power off an already blanked Vizio");
     check(controller.planExtendedIdle() == VizioAction::PowerOff, "extended idle must power Vizio off");
+}
+
+void test_vizio_smartcast_power_value_mapping() {
+    check(VizioController::fromSmartCastPowerValue(0) == VizioPowerState::Off,
+          "SmartCast power_mode VALUE=0 must map to off");
+    check(VizioController::fromSmartCastPowerValue(1) == VizioPowerState::On,
+          "SmartCast power_mode VALUE=1 must map to on");
+    check(VizioController::fromSmartCastPowerValue(2) == VizioPowerState::On,
+          "SmartCast nonzero power_mode values must map to on like pyvizio");
 }
 
 void test_pictureoff_does_not_invent_menu_open_after_restart() {
@@ -174,6 +192,7 @@ void test_device_coordinator_maps_idle_and_busy() {
     check(repeated.deadline == first.deadline, "repeated idle must preserve original deadline");
 
     const auto busy = core.onEvent(DeviceLifecycleEvent::UserBusy, t0 + 20min);
+    check(contains_action(busy, DeviceAction::SamsungPowerOn), "busy must power Samsung on if extended idle had shut it down");
     check(contains_action(busy, DeviceAction::SamsungRestoreScreenOff), "busy must restore Samsung");
     check(contains_action(busy, DeviceAction::VizioWake), "busy must wake/unblank Vizio");
     check(!busy.deadline.has_value(), "busy must cancel deadline");
@@ -206,6 +225,29 @@ void test_device_coordinator_topology_safe_displayoff_and_shutdown() {
     check(!shutdown.deadline.has_value(), "shutdown must cancel extended idle deadline");
 }
 
+void test_external_tv_settings_round_trip_and_redaction() {
+    nlohmann::json node = {
+        {"Enabled", true}, {"PreserveDesktopTopologyOnIdle", true}, {"ExtendedIdleMinutes", 60},
+        {"Samsung", {{"Enabled", true}, {"IP", "192.0.2.10"}, {"MAC", "AA:BB:CC:DD:EE:FF"}, {"Token", "sensitive-token"}}},
+        {"Vizio", {{"Enabled", true}, {"IP", "192.0.2.20"}, {"MAC", "11:22:33:44:55:66"}, {"Auth", "sensitive-auth"}}}
+    };
+    const auto settings = ExternalTvSettings::fromJson(node);
+    check(settings.enabled && settings.samsung.enabled && settings.vizio.enabled, "external device enable flags must parse");
+    check(settings.extended_idle_minutes == 60, "extended idle delay must parse");
+    check(settings.toJson() == node, "external settings must round-trip without schema loss");
+    const auto redacted = settings.toRedactedJson();
+    check(redacted["Samsung"]["Token"] == "<redacted>", "Samsung token must be redacted in logs");
+    check(redacted["Vizio"]["Auth"] == "<redacted>", "Vizio auth must be redacted in logs");
+}
+
+void test_external_tv_settings_safe_defaults() {
+    const auto settings = ExternalTvSettings::fromJson(nlohmann::json::object());
+    check(!settings.enabled && !settings.samsung.enabled && !settings.vizio.enabled,
+          "unconfigured external TVs must remain disabled");
+    check(settings.preserve_desktop_topology_on_idle, "topology preservation must default on");
+    check(settings.extended_idle_minutes == 60, "extended idle default must be 60 minutes");
+}
+
 }  // namespace
 
 int main() {
@@ -213,16 +255,20 @@ int main() {
     test_busy_cancels_deadline();
     test_extended_idle_fires_once();
     test_samsung_pictureoff_is_powered_and_blanked();
+    test_samsung_idle_when_already_pictureoff_is_noop();
     test_samsung_enable_leaves_accessibility_open();
     test_samsung_restore_open_awake_menu();
     test_samsung_restore_pictureoff_preserves_selection();
     test_samsung_restart_safe_unknown_menu_restore();
     test_samsung_power_toggle_is_state_guarded();
     test_vizio_blank_is_distinct_from_poweroff();
+    test_vizio_smartcast_power_value_mapping();
     test_pictureoff_does_not_invent_menu_open_after_restart();
     test_device_coordinator_maps_idle_and_busy();
     test_device_coordinator_extended_idle_orders_samsung_restore_before_poweroff();
     test_device_coordinator_topology_safe_displayoff_and_shutdown();
+    test_external_tv_settings_round_trip_and_redaction();
+    test_external_tv_settings_safe_defaults();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return EXIT_FAILURE;

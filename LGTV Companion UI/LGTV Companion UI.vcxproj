@@ -253,6 +253,7 @@
   <ItemGroup>
     <ClCompile Include="..\Common\ipc_v2.cpp" />
     <ClCompile Include="..\Common\log.cpp" />
+    <ClCompile Include="..\Common\external_tv_settings.cpp" />
     <ClCompile Include="..\Common\preferences.cpp" />
     <ClCompile Include="..\Common\tools.cpp" />
     <ClCompile Include="lgtv_companion_ui.cpp" />

@@ -1,5 +1,9 @@
 #include "vizio_controller.h"
 
+VizioPowerState VizioController::fromSmartCastPowerValue(int value) noexcept {
+    return value == 0 ? VizioPowerState::Off : VizioPowerState::On;
+}
+
 void VizioController::observeState(VizioPowerState power, bool blanked) noexcept {
     power_state_ = power;
     blanked_ = power == VizioPowerState::On && blanked;

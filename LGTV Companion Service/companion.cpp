@@ -5,6 +5,8 @@
 
 #include "companion.h"
 #include "web_os_client.h"
+#include "device_coordinator.h"
+#include "windows_display_power_policy.h"
 #include "../Common/tools.h"
 #include "../Common/log.h"
 #include "../Common/lg_api.h"
@@ -65,6 +67,7 @@ private:
 	std::vector<std::string>							host_ips_;
 	std::shared_ptr<Logging>							log_;
 	std::shared_ptr<IpcServer2>							ipc_server_;
+	std::shared_ptr<DeviceCoordinator>				device_coordinator_;
 
 	void												dispatchEvent(Event&);
 	void												processEvent(Event&, SessionWrapper&);
@@ -109,6 +112,19 @@ Companion::Impl::Impl(Preferences& settings)
 	file += LOG_FILE;
 	log_ = std::make_shared<Logging>(settings.log_level_, file);
 	ipc_server_ = std::make_shared<IpcServer2>(PIPENAME, &ipcCallbackStatic, (LPVOID)this);
+	if (prefs_.external_tv_.enabled)
+	{
+		device_coordinator_ = std::make_shared<DeviceCoordinator>(prefs_.external_tv_, log_);
+		INFO_("ExternalTV", "Native external-TV orchestration enabled");
+		if (prefs_.external_tv_.preserve_desktop_topology_on_idle)
+		{
+			std::string error;
+			if (!WindowsDisplayPowerPolicy::enforceTopologySafeMonitorTimeout(error))
+				WARNING_("ExternalTV", "Unable to enforce topology-safe monitor timeout: %1%", error);
+			else
+				INFO_("ExternalTV", "Topology-safe Windows monitor timeout enforced (AC/DC=Never)");
+		}
+	}
 	if (prefs_.devices_.size() > 0)
 	{
 		for (auto& device : prefs_.devices_)
@@ -176,7 +192,11 @@ bool Companion::Impl::isBusy(void)
 }
 void Companion::Impl::shutdown(bool stage){
 	if(!stage)
+	{
+		if (device_coordinator_)
+			device_coordinator_->shutdown();
 		INFO("The service has terminated.");
+	}
 	else
 	{
 		INFO("Service is shutting down. Finishing activities and closing connections");
@@ -322,6 +342,34 @@ std::string Companion::Impl::validateDevices(std::vector<std::string> devices){
 	return return_value == "" ? "invalid device id or name" : return_value;
 }
 void Companion::Impl::dispatchEvent(Event& event) {
+	// Native external-TV orchestration consumes the same authoritative service
+	// events as WebOS. The named pipe remains a compatibility output only.
+	if (device_coordinator_)
+	{
+		switch (event.getType())
+		{
+		case EVENT_SYSTEM_USERIDLE:
+			device_coordinator_->handleEvent(DeviceLifecycleEvent::UserIdle); break;
+		case EVENT_SYSTEM_USERBUSY:
+			device_coordinator_->handleEvent(DeviceLifecycleEvent::UserBusy); break;
+		case EVENT_SYSTEM_DISPLAYOFF:
+			device_coordinator_->handleEvent(DeviceLifecycleEvent::DisplayOff); break;
+		case EVENT_SYSTEM_DISPLAYON:
+			device_coordinator_->handleEvent(DeviceLifecycleEvent::DisplayOn); break;
+		case EVENT_SYSTEM_RESUME:
+		case EVENT_SYSTEM_RESUMEAUTO:
+		case EVENT_SYSTEM_BOOT:
+			device_coordinator_->handleEvent(DeviceLifecycleEvent::Resume); break;
+		case EVENT_SYSTEM_SUSPEND:
+			device_coordinator_->handleEvent(DeviceLifecycleEvent::Suspend); break;
+		case EVENT_SYSTEM_SHUTDOWN:
+		case EVENT_SYSTEM_REBOOT:
+		case EVENT_SYSTEM_UNSURE:
+			device_coordinator_->handleEvent(DeviceLifecycleEvent::Shutdown); break;
+		default:
+			break;
+		}
+	}
 	if (sessions_.size() == 0)
 		return;
 	// fix for only receiving DIMMED event when screensaver is active

@@ -33,6 +33,7 @@ using			json = nlohmann::json;
 #define         JSON_REMOTESTREAM				"RemoteStream"
 #define         JSON_REMOTESTREAM_MODE			"RemoteStreamPowerOff"
 #define         JSON_EXTERNAL_API				"ExternalAPI"
+#define         JSON_EXTERNAL_TV				"ExternalTVOrchestration"
 #define			JSON_MUTE_SPEAKERS				"MuteSpeakers"
 #define			JSON_TIMING_PRESHUTDOWN			"TimingPreshutdown"
 #define			JSON_TIMING_SHUTDOWN			"TimingShutdown"
@@ -136,7 +137,14 @@ Preferences::Preferences(std::wstring configuration_file_name)
 				{
 					bool was_fullscreen_whitelist_enabled = false;
 					bool was_process_whitelist_enabled = false;
-					json_string_ = jsonPrefs.dump(4);
+					// Never include external-device credentials in the diagnostic config dump.
+					auto logPrefs = jsonPrefs;
+					if (logPrefs[JSON_PREFS_NODE].contains(JSON_EXTERNAL_TV))
+					{
+						auto redacted = ExternalTvSettings::fromJson(logPrefs[JSON_PREFS_NODE][JSON_EXTERNAL_TV]).toRedactedJson();
+						logPrefs[JSON_PREFS_NODE][JSON_EXTERNAL_TV] = redacted;
+					}
+					json_string_ = logPrefs.dump(4);
 					version_loaded_ = j.get<int>();
 					if (version_loaded_ < 3)
 					{
@@ -264,6 +272,9 @@ Preferences::Preferences(std::wstring configuration_file_name)
 					j = jsonPrefs[JSON_PREFS_NODE][JSON_EXTERNAL_API];
 					if (!j.empty() && j.is_boolean())
 						external_api_support_ = j.get<bool>();
+					// Native Samsung/Vizio orchestration. Separate from the named-pipe External API.
+					if (jsonPrefs[JSON_PREFS_NODE].contains(JSON_EXTERNAL_TV))
+						external_tv_ = ExternalTvSettings::fromJson(jsonPrefs[JSON_PREFS_NODE][JSON_EXTERNAL_TV]);
 					// Mute Speakers
 					j = jsonPrefs[JSON_PREFS_NODE][JSON_MUTE_SPEAKERS];
 					if (!j.empty() && j.is_boolean())
@@ -562,6 +573,7 @@ bool Preferences::Preferences::writeToDisk(void)
 	prefs[JSON_PREFS_NODE][JSON_REMOTESTREAM] = (bool)remote_streaming_host_support_;
 	prefs[JSON_PREFS_NODE][JSON_REMOTESTREAM_MODE] = (bool)remote_streaming_host_prefer_power_off_;
 	prefs[JSON_PREFS_NODE][JSON_EXTERNAL_API] = (bool)external_api_support_;
+	prefs[JSON_PREFS_NODE][JSON_EXTERNAL_TV] = external_tv_.toJson();
 	prefs[JSON_PREFS_NODE][JSON_MUTE_SPEAKERS] = (bool)user_idle_mode_mute_speakers_;
 	prefs[JSON_PREFS_NODE][JSON_TIMING_SHUTDOWN] = (int)shutdown_timing_;
 	

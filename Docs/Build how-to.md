@@ -1,5 +1,5 @@
 # BUILD INSTRUCTIONS AND DEPENDENCIES
-To build the projects (UI, Service, Daemon, Console and Installer) in Visual Studio 2022 please ensure that [Vcpkg](https://github.com/microsoft/vcpkg) is installed. Vcpkg is a free library Manager for Windows. You should use Vcpkg in one of two ways:
+To build the current projects (UI, Service, Daemon, Console and Installer) use Visual Studio 2026 with the v145 C++ toolset and ensure that [Vcpkg](https://github.com/microsoft/vcpkg) is installed. Vcpkg is a free library manager for Windows. Visual Studio 2022/v143 can be used only by explicitly retargeting the projects and is not the repository default. You should use Vcpkg in one of two ways:
 
 ### Manifest
 A Vcpkg manifest is included with the source code and the necessary dependencies will be automatically downloaded, configured and installed, if you choose to enable it. To enable the manifest please open the properties for each project in the solution, then 
@@ -23,4 +23,4 @@ Alternatively, You can manually install the dependencies, with the following com
   		vcpkg install phnt:arm64-windows-static
 
 ### Building the setup package
-To build the setup package please ensure that the [Heatwave](https://www.firegiant.com/docs/heatwave/) for VS2022 extension is installed.
+To build the setup package please ensure that a [HeatWave](https://www.firegiant.com/docs/heatwave/) extension compatible with your installed Visual Studio version is installed.

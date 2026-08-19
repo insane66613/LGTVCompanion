@@ -283,6 +283,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\Common\ipc_v2.cpp" />
+    <ClCompile Include="..\Common\external_tv_settings.cpp" />
     <ClCompile Include="..\Common\preferences.cpp" />
     <ClCompile Include="..\Common\tools.cpp" />
     <ClCompile Include="daemon.cpp" />
