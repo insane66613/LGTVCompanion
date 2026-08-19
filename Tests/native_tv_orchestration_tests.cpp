@@ -3,6 +3,7 @@
 #include "../LGTV Companion Service/vizio_controller.h"
 #include "../LGTV Companion Service/device_coordinator_core.h"
 #include "../Common/external_tv_settings.h"
+#include "../Common/external_tv_diagnostics.h"
 
 #include <algorithm>
 #include <chrono>
@@ -346,6 +347,57 @@ void test_external_tv_settings_safe_defaults() {
     check(settings.extended_idle_minutes == 60, "extended idle default must be 60 minutes");
 }
 
+void test_external_tv_diagnostic_request_contract() {
+    const nlohmann::json wire = {
+        {"namespace", "external_tv"}, {"request_id", "req-123"},
+        {"device", "samsung"}, {"operation", "power_off"}
+    };
+    std::string error;
+    const auto request = ExternalTvDiagnosticRequest::fromJson(wire, &error);
+    check(request.has_value(), "valid external-TV diagnostic request must parse");
+    check(request && request->request_id == "req-123", "diagnostic request ID must be preserved");
+    check(request && request->device == ExternalTvDiagnosticDevice::Samsung,
+          "diagnostic request must preserve Samsung selector");
+    check(request && request->operation == ExternalTvDiagnosticOperation::PowerOff,
+          "diagnostic request must preserve operation");
+    check(request && request->toJson() == wire, "diagnostic request must round-trip canonically");
+}
+
+void test_external_tv_diagnostic_request_rejects_malformed_or_secret_payloads() {
+    std::string error;
+    check(!ExternalTvDiagnosticRequest::fromJson({{"namespace", "external_tv"}, {"device", "vizio"}, {"operation", "probe"}}, &error),
+          "diagnostic request without request_id must fail closed");
+    check(!ExternalTvDiagnosticRequest::fromJson({{"namespace", "external_tv"}, {"request_id", "r"}, {"device", "vizio"}, {"operation", "shutdown"}}, &error),
+          "unsupported host-like diagnostic operation must fail closed");
+    check(!ExternalTvDiagnosticRequest::fromJson({{"namespace", "external_tv"}, {"request_id", "r"}, {"device", "samsung"}, {"operation", "probe"}, {"Token", "secret"}}, &error),
+          "diagnostic IPC must reject credential-bearing fields");
+}
+
+void test_external_tv_diagnostic_response_contract_and_semantics() {
+    ExternalTvDiagnosticResponse response;
+    response.request_id = "req-123";
+    response.device = ExternalTvDiagnosticDevice::Vizio;
+    response.operation = ExternalTvDiagnosticOperation::PowerOn;
+    response.accepted = true;
+    response.executed = true;
+    response.verified = true;
+    response.resulting_state = "on";
+    response.message = "Power-on verified";
+    check(response.semanticsValid(), "verified diagnostic response must require accepted+executed and known resulting state");
+    auto wire = response.toJson();
+    check(wire.value("request_id", "") == "req-123", "diagnostic response must echo request ID");
+    check(!wire.contains("Token") && !wire.contains("Auth") && !wire.contains("credential"),
+          "diagnostic response must contain no credential fields");
+    std::string error;
+    const auto parsed = ExternalTvDiagnosticResponse::fromJson(wire, &error);
+    check(parsed.has_value() && parsed->matchesRequest("req-123"),
+          "diagnostic response must support request-ID correlation");
+
+    wire["executed"] = false;
+    check(!ExternalTvDiagnosticResponse::fromJson(wire, &error),
+          "verified=true with executed=false must be rejected as impossible semantics");
+}
+
 }  // namespace
 
 int main() {
@@ -374,6 +426,9 @@ int main() {
     test_device_coordinator_topology_safe_displayoff_and_shutdown();
     test_external_tv_settings_round_trip_and_redaction();
     test_external_tv_settings_safe_defaults();
+    test_external_tv_diagnostic_request_contract();
+    test_external_tv_diagnostic_request_rejects_malformed_or_secret_payloads();
+    test_external_tv_diagnostic_response_contract_and_semantics();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return EXIT_FAILURE;

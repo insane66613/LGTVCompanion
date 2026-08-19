@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Common/external_tv_settings.h"
+#include "../Common/external_tv_diagnostics.h"
 #include "../Common/log.h"
 #include "device_coordinator_core.h"
 #include "external_tv_transport.h"
@@ -8,6 +9,7 @@
 
 #include <boost/asio.hpp>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -18,11 +20,16 @@ public:
     DeviceCoordinator(ExternalTvSettings settings, std::shared_ptr<Logging> log);
     ~DeviceCoordinator();
 
+    using DiagnosticCallback = std::function<void(ExternalTvDiagnosticResponse)>;
+
     void handleEvent(DeviceLifecycleEvent event);
+    void runDiagnostic(ExternalTvDiagnosticRequest request, DiagnosticCallback callback);
     void shutdown();
 
 private:
     void applyPlan(DevicePlan plan);
+    ExternalTvDiagnosticResponse runSamsungDiagnostic(const ExternalTvDiagnosticRequest& request);
+    ExternalTvDiagnosticResponse runVizioDiagnostic(const ExternalTvDiagnosticRequest& request);
     void scheduleDeadline(const DevicePlan& plan);
     void executeSamsungActions(std::vector<DeviceAction> actions);
     void executeVizioActions(std::vector<DeviceAction> actions);

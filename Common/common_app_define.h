@@ -7,6 +7,7 @@
 #define			LOG_FILE						L"log.txt"
 #define			WINDOW_CLASS_UNIQUE				L"YOLOx0x0x0181818"
 #define         PIPENAME                        TEXT("\\\\.\\pipe\\LGTVyolo")
+#define         PIPENAME_EXTERNAL_TV_DIAGNOSTICS TEXT("\\\\.\\pipe\\LGTVyolo.external_tv")
 #define			NOTIFY_NEW_COMMANDLINE			1
 #define         NEWRELEASELINK                  L"https://github.com/JPersson77/LGTVCompanion/releases"
 #define         VERSIONCHECKLINK                L"https://api.github.com/repos/JPersson77/LGTVCompanion/releases/latest"

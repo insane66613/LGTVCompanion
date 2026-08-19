@@ -67,6 +67,7 @@ private:
 	std::vector<std::string>							host_ips_;
 	std::shared_ptr<Logging>							log_;
 	std::shared_ptr<IpcServer2>							ipc_server_;
+	std::shared_ptr<IpcServer2>							external_tv_ipc_server_;
 	std::shared_ptr<DeviceCoordinator>				device_coordinator_;
 
 	void												dispatchEvent(Event&);
@@ -81,7 +82,9 @@ private:
 	void												saveTopologyConfiguration(void);
 	std::string											validateDevices(std::vector<std::string>);
 	static void											ipcCallbackStatic(std::wstring message, LPVOID lpFunct);
+	static void											externalTvIpcCallbackStatic(std::wstring message, LPVOID lpFunct);
 	void												ipcCallback(std::wstring message, bool recursive = false);
+	void												externalTvIpcCallback(std::wstring message);
 	void												sendToIpc(DWORD);
 	std::vector<std::string>							grabDevices(std::vector<std::string>, int);
 	std::vector<std::string>							extractSeparateCommands(std::string);
@@ -112,6 +115,8 @@ Companion::Impl::Impl(Preferences& settings)
 	file += LOG_FILE;
 	log_ = std::make_shared<Logging>(settings.log_level_, file);
 	ipc_server_ = std::make_shared<IpcServer2>(PIPENAME, &ipcCallbackStatic, (LPVOID)this);
+	external_tv_ipc_server_ = std::make_shared<IpcServer2>(
+		PIPENAME_EXTERNAL_TV_DIAGNOSTICS, &externalTvIpcCallbackStatic, (LPVOID)this, true);
 	if (prefs_.external_tv_.enabled)
 	{
 		device_coordinator_ = std::make_shared<DeviceCoordinator>(prefs_.external_tv_, log_);
@@ -760,6 +765,42 @@ std::vector<std::string> Companion::Impl::extractSeparateCommands(std::string st
 {
 	 Companion::Impl* p = (Companion::Impl*)lpFunct;
 	 p->ipcCallback(message);
+}
+void Companion::Impl::externalTvIpcCallbackStatic(std::wstring message, LPVOID lpFunct)
+{
+	Companion::Impl* p = (Companion::Impl*)lpFunct;
+	p->externalTvIpcCallback(std::move(message));
+}
+void Companion::Impl::externalTvIpcCallback(std::wstring message)
+{
+	try
+	{
+		std::string parse_error;
+		const auto request = ExternalTvDiagnosticRequest::fromJson(json::parse(tools::narrow(message)), &parse_error);
+		if (!request)
+		{
+			WARNING_("ExternalTV", "Rejected diagnostic IPC request: %1%", parse_error);
+			return;
+		}
+		if (!device_coordinator_)
+		{
+			ExternalTvDiagnosticResponse response;
+			response.request_id = request->request_id;
+			response.device = request->device;
+			response.operation = request->operation;
+			response.message = "External-TV orchestration is disabled";
+			external_tv_ipc_server_->send(tools::widen(response.toJson().dump()));
+			return;
+		}
+		auto server = external_tv_ipc_server_;
+		device_coordinator_->runDiagnostic(*request, [server](ExternalTvDiagnosticResponse response) {
+			server->send(tools::widen(response.toJson().dump()));
+		});
+	}
+	catch (const std::exception& e)
+	{
+		WARNING_("ExternalTV", "Rejected invalid diagnostic IPC JSON: %1%", e.what());
+	}
 }
 void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 {

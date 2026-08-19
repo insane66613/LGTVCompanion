@@ -21,6 +21,7 @@
 #define IDD_ADVANCEDIDLE                153
 #define IDD_WHITELIST_EDIT              154
 #define IDD_MESSAGEBOX                  155
+#define IDD_EXTERNAL_TV                 156
 #define IDC_COMBO                       1000
 #define IDC_SPLIT                       1001
 #define IDC_OPTIONS                     1002
@@ -134,6 +135,31 @@
 #define IDC_IGNORED_KEYS_LIST           1080
 #define IDC_CHECK_IGNORE_SYSWIDE        1081
 #define IDC_SYSLINK_INFO_SYSWIDE        1082
+#define IDC_EXTERNAL_TV                 1083
+#define IDC_EXTTV_ENABLED               1084
+#define IDC_EXTTV_TOPOLOGY              1085
+#define IDC_EXTTV_IDLE_MINUTES          1086
+#define IDC_EXTTV_SAMSUNG_ENABLED       1087
+#define IDC_EXTTV_SAMSUNG_IP            1088
+#define IDC_EXTTV_SAMSUNG_MAC           1089
+#define IDC_EXTTV_SAMSUNG_TOKEN         1090
+#define IDC_EXTTV_SAMSUNG_TOKEN_STATUS  1091
+#define IDC_EXTTV_SAMSUNG_PROBE         1092
+#define IDC_EXTTV_SAMSUNG_BLANK         1093
+#define IDC_EXTTV_SAMSUNG_UNBLANK       1094
+#define IDC_EXTTV_SAMSUNG_ON            1095
+#define IDC_EXTTV_SAMSUNG_OFF           1096
+#define IDC_EXTTV_VIZIO_ENABLED         1097
+#define IDC_EXTTV_VIZIO_IP              1098
+#define IDC_EXTTV_VIZIO_MAC             1099
+#define IDC_EXTTV_VIZIO_AUTH            1100
+#define IDC_EXTTV_VIZIO_AUTH_STATUS     1101
+#define IDC_EXTTV_VIZIO_PROBE           1102
+#define IDC_EXTTV_VIZIO_BLANK           1103
+#define IDC_EXTTV_VIZIO_UNBLANK         1104
+#define IDC_EXTTV_VIZIO_ON              1105
+#define IDC_EXTTV_VIZIO_OFF             1106
+#define IDC_EXTTV_STATUS                1107
 #define ID_ADD_MANAGE                   32771
 #define ID_ADD_MANAGE32772              32772
 #define ID_ADD_REMOVE                   32773
@@ -158,9 +184,9 @@
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NO_MFC                     1
-#define _APS_NEXT_RESOURCE_VALUE        156
+#define _APS_NEXT_RESOURCE_VALUE        157
 #define _APS_NEXT_COMMAND_VALUE         32788
-#define _APS_NEXT_CONTROL_VALUE         1083
+#define _APS_NEXT_CONTROL_VALUE         1108
 #define _APS_NEXT_SYMED_VALUE           110
 #endif
 #endif

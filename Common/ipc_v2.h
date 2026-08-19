@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <thread>
+#include <atomic>
 #include <mutex>
 #include <array>
 #include <boost/asio.hpp>
@@ -13,7 +14,8 @@ class IpcServer2
 public:
 	IpcServer2(std::wstring name,
 		void (*callback)(std::wstring, LPVOID),
-		LPVOID object);
+		LPVOID object,
+		bool message_mode = false);
 	~IpcServer2();
 	bool send(std::wstring msg, int pipe = -1);
 	bool terminate();
@@ -24,7 +26,7 @@ private:
 		boost::asio::windows::stream_handle stream;
 		boost::asio::strand<boost::asio::io_context::executor_type> strand;
 		std::array<wchar_t, 1024> buffer{};
-		bool connected = false;
+		std::atomic<bool> connected{ false };
 
 		PipeInstance(boost::asio::io_context& io)
 			: stream(io), strand(io.get_executor()) {
@@ -43,12 +45,13 @@ private:
 	std::thread accept_thread_;
 
 	std::wstring name_;
+	bool message_mode_ = false;
 	void (*callback_)(std::wstring, LPVOID) = nullptr;
 	LPVOID object_ = nullptr;
 
 	std::mutex pipes_mutex_;
 	std::vector<std::shared_ptr<PipeInstance>> pipes_;
-	bool running_ = false;
+	std::atomic<bool> running_{ false };
 };
 
 class IpcClient2
@@ -56,7 +59,8 @@ class IpcClient2
 public:
 	IpcClient2(std::wstring name,
 		void (*callback)(std::wstring, LPVOID),
-		LPVOID object);
+		LPVOID object,
+		bool message_mode = false);
 	~IpcClient2();
 	bool send(std::wstring msg);
 	bool terminate();
@@ -73,11 +77,13 @@ private:
 	std::thread connect_thread_;
 
 	std::wstring name_;
+	bool message_mode_ = false;
 	void (*callback_)(std::wstring, LPVOID) = nullptr;
 	LPVOID object_ = nullptr;
 	std::atomic<bool> reconnect_{ false };
+	std::mutex send_mutex_;
 
 	HANDLE raw_ = INVALID_HANDLE_VALUE;
 	std::array<wchar_t, 1024> buffer_{};
-	bool running_ = false;
+	std::atomic<bool> running_{ false };
 };

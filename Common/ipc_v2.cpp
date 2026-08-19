@@ -7,8 +7,9 @@
 
 IpcServer2::IpcServer2(std::wstring name,
 	void (*callback)(std::wstring, LPVOID),
-	LPVOID object)
-	: name_(std::move(name)), callback_(callback), object_(object)
+	LPVOID object,
+	bool message_mode)
+	: name_(std::move(name)), message_mode_(message_mode), callback_(callback), object_(object)
 	, work_(boost::asio::make_work_guard(io_))
 {
 	running_ = true;
@@ -36,10 +37,13 @@ void IpcServer2::accept_loop()
 	while (running_) {
 		auto pipe = std::make_shared<PipeInstance>(io_);
 
+		const DWORD pipe_mode = message_mode_
+			? (PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE)
+			: (PIPE_TYPE_BYTE | PIPE_READMODE_BYTE);
 		pipe->raw_handle = CreateNamedPipeW(
 			name_.c_str(),
 			PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-			PIPE_TYPE_BYTE | PIPE_READMODE_BYTE,
+			pipe_mode,
 			50,
 			4096, 4096,
 			0,
@@ -48,30 +52,85 @@ void IpcServer2::accept_loop()
 		if (pipe->raw_handle == INVALID_HANDLE_VALUE)
 			continue;
 		
+		HANDLE connect_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+		if (!connect_event)
+		{
+			CloseHandle(pipe->raw_handle);
+			pipe->raw_handle = INVALID_HANDLE_VALUE;
+			continue;
+		}
+		OVERLAPPED connect_overlapped{};
+		connect_overlapped.hEvent = connect_event;
 		pending_handle_ = pipe->raw_handle;
 
-		BOOL ok = ConnectNamedPipe(pipe->raw_handle, nullptr);
+		bool connected = false;
+		BOOL ok = ConnectNamedPipe(pipe->raw_handle, &connect_overlapped);
+		if (ok)
+		{
+			connected = true;
+		}
+		else
+		{
+			const DWORD err = GetLastError();
+			if (err == ERROR_PIPE_CONNECTED)
+			{
+				connected = true;
+			}
+			else if (err == ERROR_IO_PENDING)
+			{
+				while (running_)
+				{
+					const DWORD wait = WaitForSingleObject(connect_event, 100);
+					if (wait == WAIT_OBJECT_0)
+					{
+						DWORD ignored = 0;
+						connected = GetOverlappedResult(pipe->raw_handle, &connect_overlapped, &ignored, FALSE) == TRUE;
+						break;
+					}
+					if (wait == WAIT_FAILED)
+						break;
+				}
+				if (!running_ && !connected)
+				{
+					CancelIoEx(pipe->raw_handle, &connect_overlapped);
+					DWORD ignored = 0;
+					GetOverlappedResult(pipe->raw_handle, &connect_overlapped, &ignored, TRUE);
+				}
+			}
+		}
 		pending_handle_ = INVALID_HANDLE_VALUE;
+		CloseHandle(connect_event);
 
-		if (!ok) {
-			DWORD err = GetLastError();
-			if (err != ERROR_PIPE_CONNECTED) {
-				CloseHandle(pipe->raw_handle);
+		if (!connected || !running_)
+		{
+			CloseHandle(pipe->raw_handle);
+			pipe->raw_handle = INVALID_HANDLE_VALUE;
+			continue;
+		}
+
+		boost::system::error_code assign_error;
+		pipe->stream.assign(pipe->raw_handle, assign_error);
+		if (assign_error)
+		{
+			CloseHandle(pipe->raw_handle);
+			pipe->raw_handle = INVALID_HANDLE_VALUE;
+			continue;
+		}
+		pipe->connected = true;
+		{
+			std::lock_guard<std::mutex> lock(pipes_mutex_);
+			if (!running_)
+			{
+				pipe->connected = false;
+				pipe->stream.close();
 				pipe->raw_handle = INVALID_HANDLE_VALUE;
 				continue;
 			}
+			pipes_.push_back(pipe);
 		}
-
-		boost::asio::post(io_, [this, pipe] {
-			pipe->stream.assign(pipe->raw_handle);
-			pipe->connected = true;
-
-			{
-				std::lock_guard<std::mutex> lock(pipes_mutex_);
-				pipes_.push_back(pipe);
-			}
-
-			start_read(pipe);
+		boost::asio::post(pipe->strand, [this, pipe] {
+			if (running_ && pipe->connected)
+				start_read(pipe);
 			});
 	}
 }
@@ -147,6 +206,7 @@ bool IpcServer2::terminate()
 	{
 		std::lock_guard<std::mutex> lock(pipes_mutex_);
 		for (auto& p : pipes_) {
+			p->connected = false;
 			if (p->stream.is_open())
 			{
 				p->stream.close();
@@ -154,10 +214,9 @@ bool IpcServer2::terminate()
 			}
 		}
 	}
-	HANDLE h = pending_handle_.exchange(INVALID_HANDLE_VALUE); 
-	if (h != INVALID_HANDLE_VALUE) { 
-		CloseHandle(h); 
-	}
+	HANDLE h = pending_handle_.load();
+	if (h != INVALID_HANDLE_VALUE)
+		CancelIoEx(h, nullptr);
 
 	work_.reset();
 	io_.stop();
@@ -172,8 +231,10 @@ bool IpcServer2::terminate()
 
 IpcClient2::IpcClient2(std::wstring name,
 	void (*callback)(std::wstring, LPVOID),
-	LPVOID object)
+	LPVOID object,
+	bool message_mode)
 	: name_(std::move(name)),
+	message_mode_(message_mode),
 	callback_(callback),
 	object_(object),
 	stream_(io_),
@@ -202,11 +263,19 @@ bool IpcClient2::terminate()
 
 	running_ = false;
 
-	// Cancel all async ops 
-	if (stream_.is_open())
+	// Serialize native-handle teardown against synchronous overlapped writes.
 	{
-		stream_.close();
-		raw_ = INVALID_HANDLE_VALUE;
+		std::lock_guard<std::mutex> lock(send_mutex_);
+		if (stream_.is_open())
+		{
+			stream_.close();
+			raw_ = INVALID_HANDLE_VALUE;
+		}
+		else if (raw_ != INVALID_HANDLE_VALUE)
+		{
+			CloseHandle(raw_);
+			raw_ = INVALID_HANDLE_VALUE;
+		}
 	}
 
 	work_.reset();
@@ -221,7 +290,7 @@ bool IpcClient2::terminate()
 void IpcClient2::connect_loop()
 {
 	while (running_) {
-		raw_ = CreateFileW(
+		HANDLE connected_handle = CreateFileW(
 			name_.c_str(),
 			GENERIC_READ | GENERIC_WRITE,
 			0,
@@ -230,7 +299,7 @@ void IpcClient2::connect_loop()
 			FILE_FLAG_OVERLAPPED,
 			nullptr);
 
-		if (raw_ == INVALID_HANDLE_VALUE)
+		if (connected_handle == INVALID_HANDLE_VALUE)
 		{
 			DWORD err = GetLastError();
 			if (err == ERROR_PIPE_BUSY) {
@@ -242,14 +311,31 @@ void IpcClient2::connect_loop()
 				Sleep(100);
 		}
 		else {
-			// Connected
-			boost::asio::post(io_, [this] {
+			if (message_mode_)
+			{
+				DWORD mode = PIPE_READMODE_MESSAGE;
+				if (!SetNamedPipeHandleState(connected_handle, &mode, nullptr, nullptr))
+				{
+					CloseHandle(connected_handle);
+					if (running_) Sleep(100);
+					continue;
+				}
+			}
+			{
+				std::lock_guard<std::mutex> lock(send_mutex_);
 				if (!running_)
 				{
-					CloseHandle(raw_);
-					raw_ = INVALID_HANDLE_VALUE;
+					CloseHandle(connected_handle);
 					return;
 				}
+				raw_ = connected_handle;
+			}
+			// Connected. Assignment is serialized with send/terminate so the
+			// native HANDLE cannot be closed or replaced while a write is pending.
+			boost::asio::post(io_, [this] {
+				std::lock_guard<std::mutex> lock(send_mutex_);
+				if (!running_ || raw_ == INVALID_HANDLE_VALUE)
+					return;
 				stream_.assign(raw_);
 				start_read();
 				});
@@ -273,11 +359,14 @@ void IpcClient2::start_read()
 		[this](const boost::system::error_code& ec, std::size_t bytes)
 		{
 			if (ec) {
-				// Cancel all async ops 
-				if (stream_.is_open())
+				// Serialize close/reconnect against a pending synchronous write.
 				{
-					stream_.close();
-					raw_ = INVALID_HANDLE_VALUE;
+					std::lock_guard<std::mutex> lock(send_mutex_);
+					if (stream_.is_open())
+					{
+						stream_.close();
+						raw_ = INVALID_HANDLE_VALUE;
+					}
 				}
 				
 				if(running_)
@@ -294,17 +383,38 @@ void IpcClient2::start_read()
 }
 bool IpcClient2::send(const std::wstring msg)
 {
-    if (!running_ || raw_ == INVALID_HANDLE_VALUE)
-        return false;
+	std::lock_guard<std::mutex> lock(send_mutex_);
+	if (!running_ || raw_ == INVALID_HANDLE_VALUE)
+		return false;
 
-    DWORD written = 0;
-    BOOL ok = WriteFile(
-        raw_,
-        msg.data(),
-        (DWORD)(msg.size() * sizeof(wchar_t)),
-        &written,
-        nullptr);
-
-    return ok == TRUE;
+	HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+	if (!event)
+		return false;
+	OVERLAPPED overlapped{};
+	overlapped.hEvent = event;
+	DWORD written = 0;
+	BOOL ok = WriteFile(
+		raw_,
+		msg.data(),
+		(DWORD)(msg.size() * sizeof(wchar_t)),
+		&written,
+		&overlapped);
+	if (!ok && GetLastError() == ERROR_IO_PENDING)
+	{
+		if (WaitForSingleObject(event, 5000) == WAIT_OBJECT_0)
+			ok = GetOverlappedResult(raw_, &overlapped, &written, FALSE);
+		else
+		{
+			// CancelIoEx only requests cancellation. The OVERLAPPED and its event
+			// must remain alive until the kernel reports final completion.
+			CancelIoEx(raw_, &overlapped);
+			DWORD ignored = 0;
+			GetOverlappedResult(raw_, &overlapped, &ignored, TRUE);
+			ok = FALSE;
+		}
+	}
+	const bool complete = ok == TRUE && written == msg.size() * sizeof(wchar_t);
+	CloseHandle(event);
+	return complete;
 }
 

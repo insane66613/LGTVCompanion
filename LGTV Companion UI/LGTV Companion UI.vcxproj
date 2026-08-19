@@ -242,6 +242,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\Common\common_app_define.h" />
+    <ClInclude Include="..\Common\external_tv_diagnostics.h" />
     <ClInclude Include="..\Common\ipc_v2.h" />
     <ClInclude Include="..\Common\preferences.h" />
     <ClInclude Include="..\Common\restart_strings.h" />
@@ -253,6 +254,7 @@
   <ItemGroup>
     <ClCompile Include="..\Common\ipc_v2.cpp" />
     <ClCompile Include="..\Common\log.cpp" />
+    <ClCompile Include="..\Common\external_tv_diagnostics.cpp" />
     <ClCompile Include="..\Common\external_tv_settings.cpp" />
     <ClCompile Include="..\Common\preferences.cpp" />
     <ClCompile Include="..\Common\tools.cpp" />
