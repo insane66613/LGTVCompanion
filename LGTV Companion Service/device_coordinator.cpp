@@ -33,23 +33,39 @@ void DeviceCoordinator::handleEvent(DeviceLifecycleEvent event) {
     // Once admitted under the same lock used by shutdown(), an event must drain
     // even if teardown starts before the control executor reaches it.
     boost::asio::post(control_ioc_, [this, event]() {
+        if (log_) log_->debug("ExternalTV", "Lifecycle event admitted: " + std::to_string(static_cast<int>(event)));
         applyPlan(core_.onEvent(event, IdleCoordinator::Clock::now()));
     });
 }
 
 void DeviceCoordinator::scheduleDeadline(const DevicePlan& plan) {
     if (!plan.deadline_changed) return;
-    deadline_timer_.cancel();
-    if (!plan.deadline) return;
+    const auto cancelled = deadline_timer_.cancel();
+    if (!plan.deadline) {
+        if (log_) log_->debug("ExternalTV", "Extended-idle deadline cancelled; pending waits: " + std::to_string(cancelled));
+        return;
+    }
+    const auto now = IdleCoordinator::Clock::now();
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(*plan.deadline - now).count();
+    if (log_) log_->debug("ExternalTV", "Extended-idle deadline armed in " + std::to_string(seconds) + " second(s)");
     deadline_timer_.expires_at(*plan.deadline);
     deadline_timer_.async_wait([this](const boost::system::error_code& ec) {
-        if (ec || stopped_) return;
+        if (ec) {
+            if (log_) log_->debug("ExternalTV", "Extended-idle timer wait ended: " + ec.message());
+            return;
+        }
+        if (stopped_) {
+            if (log_) log_->debug("ExternalTV", "Extended-idle timer fired after coordinator stop; ignored");
+            return;
+        }
+        if (log_) log_->debug("ExternalTV", "Extended-idle timer fired");
         applyPlan(core_.onDeadline(IdleCoordinator::Clock::now()));
     });
 }
 
 void DeviceCoordinator::applyPlan(DevicePlan plan) {
     scheduleDeadline(plan);
+    if (log_) log_->debug("ExternalTV", "Applying device plan; action count: " + std::to_string(plan.actions.size()));
     std::vector<DeviceAction> samsung;
     std::vector<DeviceAction> vizio;
     for (const auto action : plan.actions) {
@@ -94,6 +110,7 @@ bool DeviceCoordinator::executeSamsungSteps(const std::vector<SamsungCommandStep
 
 void DeviceCoordinator::executeSamsungActions(std::vector<DeviceAction> actions) {
     for (const auto action : actions) {
+        if (log_) log_->debug("ExternalTV", "Samsung action start: " + std::to_string(static_cast<int>(action)));
         // Actions admitted before shutdown must finish; stopped_ prevents new
         // plans from entering but does not abandon an in-flight power sequence.
         std::string error;
@@ -157,6 +174,7 @@ void DeviceCoordinator::executeSamsungActions(std::vector<DeviceAction> actions)
 
 void DeviceCoordinator::executeVizioActions(std::vector<DeviceAction> actions) {
     for (const auto action : actions) {
+        if (log_) log_->debug("ExternalTV", "Vizio action start: " + std::to_string(static_cast<int>(action)));
         // Actions admitted before shutdown must finish; stopped_ prevents new
         // plans from entering but does not abandon an in-flight power sequence.
         std::string error;
@@ -166,30 +184,45 @@ void DeviceCoordinator::executeVizioActions(std::vector<DeviceAction> actions) {
             ok = vizio_transport_->blankPanel(error);
             break;
         case DeviceAction::VizioWake: {
-            // TVCODE retries transient SmartCast BACK failures before deciding
-            // the TV was actually powered off. Preserve that distinction so a
-            // powered-but-blank Vizio is never mistaken for a successful wake.
+            std::string state_error;
+            auto state = vizio_transport_->queryPowerState(state_error);
+            const auto wake_plan = VizioController::planWakeForObservedPowerState(state);
+
+            if (wake_plan == VizioAction::PowerOn) {
+                ok = vizio_transport_->powerOn(error);
+                break;
+            }
+
+            // A powered-but-blank TV should be restored with BACK, but an OFF
+            // TV may ACK BACK without waking. For unknown state, every accepted
+            // BACK is therefore followed by a real power-state probe.
             ok = false;
             for (int attempt = 0; attempt <= 10; ++attempt) {
                 if (attempt > 0) std::this_thread::sleep_for(3000ms);
-                if (vizio_transport_->unblankPanel(error)) {
+                std::string unblank_error;
+                if (!vizio_transport_->unblankPanel(unblank_error)) {
+                    error = unblank_error;
+                    continue;
+                }
+                if (wake_plan == VizioAction::UnblankPanel) {
                     ok = true;
                     break;
                 }
-            }
-            if (!ok) {
-                std::string state_error;
-                const auto state = vizio_transport_->queryPowerState(state_error);
-                if (state == VizioPowerState::Off) {
-                    std::string power_error;
-                    ok = vizio_transport_->powerOn(power_error);
-                    if (!ok) error += "; power-on fallback: " + power_error;
-                } else if (state == VizioPowerState::On) {
-                    error = "unblank retries exhausted; TV remains powered/blanked";
-                } else {
-                    error += "; power-state check failed: " + state_error;
+
+                std::string after_error;
+                state = vizio_transport_->queryPowerState(after_error);
+                if (state == VizioPowerState::On) {
+                    ok = true;
+                    break;
                 }
+                if (state == VizioPowerState::Off) {
+                    ok = vizio_transport_->powerOn(error);
+                    break;
+                }
+                error = "BACK accepted but power state remains unknown: " + after_error;
             }
+            if (!ok && state_error.size() > 0 && error.size() == 0)
+                error = "initial power-state check failed: " + state_error;
             break;
         }
         case DeviceAction::VizioPowerOff:
@@ -198,7 +231,11 @@ void DeviceCoordinator::executeVizioActions(std::vector<DeviceAction> actions) {
         default:
             break;
         }
-        if (!ok) logFailure("Vizio", "device action", error);
+        if (!ok) {
+            logFailure("Vizio", "device action", error);
+        } else if (log_) {
+            log_->debug("ExternalTV", "Vizio action accepted: " + std::to_string(static_cast<int>(action)));
+        }
     }
 }
 

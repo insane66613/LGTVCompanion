@@ -16,6 +16,7 @@
 #include <array>
 #include <chrono>
 #include <cctype>
+#include <cstdint>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -58,6 +59,29 @@ std::string samsungTarget(const std::string& token) {
     return target;
 }
 
+template <typename WebSocket>
+bool waitForSamsungAuthorization(WebSocket& ws, std::string& error) {
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    beast::flat_buffer buffer;
+    while (std::chrono::steady_clock::now() < deadline) {
+        beast::get_lowest_layer(ws).expires_at(deadline);
+        ws.read(buffer);
+        const auto message = beast::buffers_to_string(buffer.data());
+        buffer.consume(buffer.size());
+        const auto authorization = SamsungController::channelAuthorizationFromJson(message);
+        if (authorization == SamsungChannelAuthorization::Authorized) {
+            error.clear();
+            return true;
+        }
+        if (authorization == SamsungChannelAuthorization::Unauthorized) {
+            error = "Samsung rejected remote-control authorization";
+            return false;
+        }
+    }
+    error = "Samsung did not send ms.channel.connect before authorization deadline";
+    return false;
+}
+
 bool findStringKey(const nlohmann::json& node, const std::string& key, std::string& value) {
     if (node.is_object()) {
         const auto it = node.find(key);
@@ -71,24 +95,6 @@ bool findStringKey(const nlohmann::json& node, const std::string& key, std::stri
     } else if (node.is_array()) {
         for (const auto& item : node) {
             if (findStringKey(item, key, value)) return true;
-        }
-    }
-    return false;
-}
-
-bool findIntegerKey(const nlohmann::json& node, const std::string& key, int& value) {
-    if (node.is_object()) {
-        const auto it = node.find(key);
-        if (it != node.end() && it->is_number_integer()) {
-            value = it->get<int>();
-            return true;
-        }
-        for (const auto& item : node.items()) {
-            if (findIntegerKey(item.value(), key, value)) return true;
-        }
-    } else if (node.is_array()) {
-        for (const auto& item : node) {
-            if (findIntegerKey(item, key, value)) return true;
         }
     }
     return false;
@@ -212,6 +218,7 @@ bool SamsungTizenTransport::sendKeyTls(SamsungRemoteKey key, std::string& error)
         beast::get_lowest_layer(ws).connect(resolver.resolve(settings_.ip, "8002"));
         ws.next_layer().handshake(ssl::stream_base::client);
         ws.handshake(settings_.ip, samsungTarget(settings_.token));
+        if (!waitForSamsungAuthorization(ws, error)) return false;
         const auto payload = samsungPayload(key);
         ws.write(asio::buffer(payload));
         beast::error_code ec;
@@ -232,6 +239,7 @@ bool SamsungTizenTransport::sendKeyPlain(SamsungRemoteKey key, std::string& erro
         beast::get_lowest_layer(ws).expires_after(5s);
         beast::get_lowest_layer(ws).connect(resolver.resolve(settings_.ip, "8001"));
         ws.handshake(settings_.ip, samsungTarget(""));
+        if (!waitForSamsungAuthorization(ws, error)) return false;
         const auto payload = samsungPayload(key);
         ws.write(asio::buffer(payload));
         beast::error_code ec;
@@ -278,7 +286,13 @@ bool VizioSmartCastTransport::request(const std::string& method, const std::stri
         req.target(target);
         req.version(11);
         req.set(http::field::host, settings_.ip);
-        req.set(http::field::user_agent, "LGTVCompanion");
+        // Match the proven SmartCast client envelope. This firmware returns
+        // RESULT=SUCCESS yet can discard key commands when these ordinary
+        // HTTP/1.1 client headers are omitted.
+        req.set(http::field::user_agent, "python-requests/2.31.0");
+        req.set(http::field::accept, "*/*");
+        req.set(http::field::accept_encoding, "gzip, deflate");
+        req.set(http::field::connection, "keep-alive");
         req.set("AUTH", settings_.auth);
         if (method != "GET") {
             req.set(http::field::content_type, "application/json");
@@ -289,8 +303,6 @@ bool VizioSmartCastTransport::request(const std::string& method, const std::stri
         beast::flat_buffer buffer;
         http::response<http::string_body> res;
         http::read(stream, buffer, res);
-        beast::error_code ec;
-        stream.shutdown(ec);
         response = res.body();
         if (res.result_int() < 200 || res.result_int() >= 300) {
             error = "Vizio SmartCast HTTP " + std::to_string(res.result_int());
@@ -312,6 +324,18 @@ bool VizioSmartCastTransport::request(const std::string& method, const std::stri
         } catch (const std::exception& e) {
             error = std::string("Vizio SmartCast invalid JSON: ") + e.what();
             return false;
+        }
+
+        // This Vizio firmware acknowledges key_command before the remote-key
+        // action is durably queued. After prolonged blanking, 500 ms was too
+        // short, and a graceful TLS close_notify still caused an accepted
+        // POW_OFF to be discarded. Holding the connection for 2 s and then
+        // closing the socket without close_notify reliably transitions power.
+        if (method != "GET" && target == "/key_command/") {
+            std::this_thread::sleep_for(2000ms);
+        } else {
+            beast::error_code ec;
+            stream.shutdown(ec);
         }
         error.clear();
         return true;
@@ -344,27 +368,18 @@ bool VizioSmartCastTransport::blankPanel(std::string& error) const {
     std::string response;
     const std::string path = "/menu_native/dynamic/tv_settings/timers/blank_screen";
     if (!request("GET", path, "", response, error)) return false;
-    int hashval = 0;
-    try {
-        const auto json = nlohmann::json::parse(response);
-        if (!findIntegerKey(json, "HASHVAL", hashval) && !findIntegerKey(json, "hashval", hashval)) {
-            error = "Vizio blank-screen HASHVAL missing";
-            return false;
-        }
-    } catch (const std::exception& e) {
-        error = e.what();
+    const auto hashval = VizioController::smartCastHashValFromJson(response);
+    if (!hashval) {
+        error = "Vizio blank-screen HASHVAL missing or invalid";
         return false;
     }
-    nlohmann::json payload = {{"REQUEST", "ACTION"}, {"HASHVAL", hashval}};
+    nlohmann::json payload = {{"REQUEST", "ACTION"}, {"HASHVAL", *hashval}};
     return request("PUT", path, payload.dump(), response, error);
 }
 
 bool VizioSmartCastTransport::keyPress(int codeset, int code, std::string& error) const {
-    nlohmann::json payload = {{"KEYLIST", nlohmann::json::array({{
-        {"CODESET", codeset}, {"CODE", code}, {"ACTION", "KEYPRESS"}
-    }})}};
     std::string response;
-    return request("PUT", "/key_command/", payload.dump(), response, error);
+    return request("PUT", "/key_command/", VizioController::smartCastKeyPayload(codeset, code), response, error);
 }
 
 bool VizioSmartCastTransport::unblankPanel(std::string& error) const {
@@ -372,7 +387,51 @@ bool VizioSmartCastTransport::unblankPanel(std::string& error) const {
 }
 
 bool VizioSmartCastTransport::powerOff(std::string& error) const {
-    return keyPress(11, 0, error); // Explicit OFF, not POW_TOGGLE.
+    std::string state_error;
+    auto state = queryPowerState(state_error);
+    if (state == VizioPowerState::Off) {
+        error.clear();
+        return true;
+    }
+    if (!VizioController::shouldSendPowerOff(state)) {
+        error = "Vizio power state unknown; POW_OFF suppressed: " + state_error;
+        return false;
+    }
+
+    const auto initial_state = state;
+    std::string last_state_error;
+    for (int command_attempt = 0; command_attempt < 2; ++command_attempt) {
+        std::string key_error;
+        if (!keyPress(11, 0, key_error)) {
+            error = "Vizio POW_OFF command failed: " + key_error;
+            return false;
+        }
+
+        for (int verify_attempt = 0; verify_attempt < 8; ++verify_attempt) {
+            std::this_thread::sleep_for(1000ms);
+            state = queryPowerState(last_state_error);
+            if (state == VizioPowerState::Off) {
+                error.clear();
+                return true;
+            }
+        }
+
+        // This model's nominal POW_OFF behaves toggle-like when repeated, so a
+        // retry is safe only after the entire verification window still proves
+        // that the first command left the set ON. OFF and UNKNOWN suppress it.
+        if (command_attempt == 0 &&
+            VizioController::shouldRetryPowerOffAfterVerification(initial_state, state)) {
+            continue;
+        }
+        break;
+    }
+
+    if (state == VizioPowerState::On) {
+        error = "Vizio POW_OFF accepted but device remained ON after guarded retry";
+    } else {
+        error = "Vizio POW_OFF accepted but OFF state was not verified: " + last_state_error;
+    }
+    return false;
 }
 
 bool VizioSmartCastTransport::wake(std::string& error) const {

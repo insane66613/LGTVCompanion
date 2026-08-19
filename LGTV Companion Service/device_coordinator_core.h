@@ -46,4 +46,5 @@ private:
 
     IdleCoordinator idle_;
     bool preserve_desktop_topology_on_idle_;
+    bool restore_needed_{true};
 };

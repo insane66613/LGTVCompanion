@@ -1,5 +1,7 @@
 #include "samsung_controller.h"
 
+#include <nlohmann/json.hpp>
+
 using namespace std::chrono_literals;
 
 void SamsungController::observePowerState(SamsungPowerState state) noexcept {
@@ -20,6 +22,17 @@ bool SamsungController::isPowered(SamsungPowerState state) noexcept {
 
 bool SamsungController::isBlanked(SamsungPowerState state) noexcept {
     return state == SamsungPowerState::PictureOff;
+}
+
+SamsungChannelAuthorization SamsungController::channelAuthorizationFromJson(const std::string& message) noexcept {
+    try {
+        const auto json = nlohmann::json::parse(message);
+        const auto event = json.value("event", std::string{});
+        if (event == "ms.channel.connect") return SamsungChannelAuthorization::Authorized;
+        if (event == "ms.channel.unauthorized") return SamsungChannelAuthorization::Unauthorized;
+    } catch (...) {
+    }
+    return SamsungChannelAuthorization::Pending;
 }
 
 std::vector<SamsungCommandStep> SamsungController::planEnableScreenOff() {

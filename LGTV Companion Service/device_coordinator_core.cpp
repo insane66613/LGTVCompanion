@@ -9,12 +9,16 @@ DeviceCoordinatorCore::DeviceCoordinatorCore(
 
 DevicePlan DeviceCoordinatorCore::shortIdle(IdleCoordinator::TimePoint now) {
     DevicePlan plan;
-    plan.deadline_changed = idle_.onIdle(now);
+    const bool first_idle = idle_.onIdle(now);
+    plan.deadline_changed = first_idle;
     plan.deadline = idle_.deadline();
-    plan.actions = {
-        DeviceAction::SamsungEnableScreenOff,
-        DeviceAction::VizioBlankPanel,
-    };
+    if (first_idle) {
+        restore_needed_ = true;
+        plan.actions = {
+            DeviceAction::SamsungEnableScreenOff,
+            DeviceAction::VizioBlankPanel,
+        };
+    }
     return plan;
 }
 
@@ -22,11 +26,14 @@ DevicePlan DeviceCoordinatorCore::restoreActive() {
     DevicePlan plan;
     plan.deadline_changed = idle_.onBusy();
     plan.deadline = idle_.deadline();
-    plan.actions = {
-        DeviceAction::SamsungPowerOn,
-        DeviceAction::SamsungRestoreScreenOff,
-        DeviceAction::VizioWake,
-    };
+    if (restore_needed_) {
+        restore_needed_ = false;
+        plan.actions = {
+            DeviceAction::SamsungPowerOn,
+            DeviceAction::SamsungRestoreScreenOff,
+            DeviceAction::VizioWake,
+        };
+    }
     return plan;
 }
 
@@ -34,6 +41,7 @@ DevicePlan DeviceCoordinatorCore::fullPowerOff() {
     DevicePlan plan;
     plan.deadline_changed = idle_.onBusy();
     plan.deadline = idle_.deadline();
+    restore_needed_ = true;
     plan.actions = {
         DeviceAction::VizioPowerOff,
         DeviceAction::SamsungRestoreScreenOff,
@@ -70,6 +78,7 @@ DevicePlan DeviceCoordinatorCore::onDeadline(IdleCoordinator::TimePoint now) {
 
     DevicePlan plan;
     plan.deadline_changed = true;
+    restore_needed_ = true;
     plan.actions = {
         DeviceAction::VizioPowerOff,
         DeviceAction::SamsungRestoreScreenOff,

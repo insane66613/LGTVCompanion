@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <string>
 #include <vector>
 
 enum class SamsungPowerState {
@@ -9,6 +10,12 @@ enum class SamsungPowerState {
     PictureOff,
     Standby,
     ReachableNoState,
+};
+
+enum class SamsungChannelAuthorization {
+    Pending,
+    Authorized,
+    Unauthorized,
 };
 
 enum class SamsungAccessibilityState {
@@ -39,6 +46,7 @@ public:
 
     static bool isPowered(SamsungPowerState state) noexcept;
     static bool isBlanked(SamsungPowerState state) noexcept;
+    static SamsungChannelAuthorization channelAuthorizationFromJson(const std::string& message) noexcept;
 
     std::vector<SamsungCommandStep> planEnableScreenOff();
     std::vector<SamsungCommandStep> planDisableScreenOff();

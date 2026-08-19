@@ -145,6 +145,18 @@ void test_samsung_power_toggle_is_state_guarded() {
     check(!controller.shouldSendPowerToggleForOff(), "unknown -> off must suppress KEY_POWER");
 }
 
+void test_samsung_channel_authorization_frames() {
+    check(SamsungController::channelAuthorizationFromJson(R"({"event":"ms.channel.connect","data":{"token":"123"}})") ==
+              SamsungChannelAuthorization::Authorized,
+          "Tizen ms.channel.connect must authorize remote-key delivery");
+    check(SamsungController::channelAuthorizationFromJson(R"({"event":"ms.channel.unauthorized"})") ==
+              SamsungChannelAuthorization::Unauthorized,
+          "Tizen unauthorized event must reject remote-key delivery");
+    check(SamsungController::channelAuthorizationFromJson(R"({"event":"ms.channel.clientConnect"})") ==
+              SamsungChannelAuthorization::Pending,
+          "unrelated Tizen frames must not authorize key delivery");
+}
+
 void test_vizio_blank_is_distinct_from_poweroff() {
     VizioController controller;
     controller.observeState(VizioPowerState::On, false);
@@ -162,6 +174,52 @@ void test_vizio_smartcast_power_value_mapping() {
           "SmartCast power_mode VALUE=1 must map to on");
     check(VizioController::fromSmartCastPowerValue(2) == VizioPowerState::On,
           "SmartCast nonzero power_mode values must map to on like pyvizio");
+}
+
+void test_vizio_power_off_command_is_state_guarded() {
+    check(VizioController::shouldSendPowerOff(VizioPowerState::On),
+          "Vizio POW_OFF may be sent only from verified ON state");
+    check(!VizioController::shouldSendPowerOff(VizioPowerState::Off),
+          "Vizio POW_OFF must be suppressed when already OFF because this model toggles back ON");
+    check(!VizioController::shouldSendPowerOff(VizioPowerState::Unknown),
+          "Vizio POW_OFF must be suppressed when power state is unknown");
+
+    check(VizioController::shouldRetryPowerOffAfterVerification(VizioPowerState::On, VizioPowerState::On),
+          "one POW_OFF retry is allowed only when the first verified transition still proves ON");
+    check(!VizioController::shouldRetryPowerOffAfterVerification(VizioPowerState::On, VizioPowerState::Off),
+          "POW_OFF must never retry after OFF is observed");
+    check(!VizioController::shouldRetryPowerOffAfterVerification(VizioPowerState::On, VizioPowerState::Unknown),
+          "POW_OFF must never retry after state becomes unknown");
+}
+
+void test_vizio_wake_is_state_aware() {
+    check(VizioController::planWakeForObservedPowerState(VizioPowerState::Off) == VizioAction::PowerOn,
+          "busy/resume must power on a verified-OFF Vizio instead of trusting BACK ACK");
+    check(VizioController::planWakeForObservedPowerState(VizioPowerState::On) == VizioAction::UnblankPanel,
+          "busy/resume may unblank a verified-ON Vizio");
+    check(VizioController::planWakeForObservedPowerState(VizioPowerState::Unknown) == VizioAction::None,
+          "unknown Vizio state must stay in conservative fallback handling");
+}
+
+void test_vizio_key_payload_matches_pyvizio_shape() {
+    const auto payload = nlohmann::json::parse(VizioController::smartCastKeyPayload(11, 0));
+    check(payload.value("_url", "") == "/key_command/",
+          "SmartCast key payload must include pyvizio _url metadata");
+    check(payload.contains("KEYLIST") && payload["KEYLIST"].is_array() && payload["KEYLIST"].size() == 1,
+          "SmartCast key payload must contain one KEYLIST entry");
+    const auto& key = payload["KEYLIST"][0];
+    check(key.value("CODESET", -1) == 11 && key.value("CODE", -1) == 0 && key.value("ACTION", "") == "KEYPRESS",
+          "SmartCast key payload must preserve codeset, code, and KEYPRESS action");
+}
+
+void test_vizio_smartcast_hashval_preserves_unsigned_32_bit_range() {
+    const std::string response = R"({"STATUS":{"RESULT":"SUCCESS"},"ITEMS":[{"HASHVAL":3453326231}]})";
+    const auto hashval = VizioController::smartCastHashValFromJson(response);
+    check(hashval.has_value(), "SmartCast HASHVAL must parse from nested response");
+    check(hashval == std::optional<std::uint64_t>{3453326231ULL},
+          "SmartCast HASHVAL above INT_MAX must be preserved without signed overflow");
+    check(!VizioController::smartCastHashValFromJson(R"({"ITEMS":[{"HASHVAL":-1}]})").has_value(),
+          "negative SmartCast HASHVAL must be rejected");
 }
 
 void test_pictureoff_does_not_invent_menu_open_after_restart() {
@@ -190,12 +248,30 @@ void test_device_coordinator_maps_idle_and_busy() {
     const auto repeated = core.onEvent(DeviceLifecycleEvent::UserIdle, t0 + 10min);
     check(!repeated.deadline_changed, "repeated idle must not change deadline");
     check(repeated.deadline == first.deadline, "repeated idle must preserve original deadline");
+    check(repeated.actions.empty(), "repeated idle must not re-send Samsung/Vizio blank actions");
 
     const auto busy = core.onEvent(DeviceLifecycleEvent::UserBusy, t0 + 20min);
     check(contains_action(busy, DeviceAction::SamsungPowerOn), "busy must power Samsung on if extended idle had shut it down");
     check(contains_action(busy, DeviceAction::SamsungRestoreScreenOff), "busy must restore Samsung");
     check(contains_action(busy, DeviceAction::VizioWake), "busy must wake/unblank Vizio");
     check(!busy.deadline.has_value(), "busy must cancel deadline");
+
+    const auto repeated_busy = core.onEvent(DeviceLifecycleEvent::UserBusy, t0 + 21min);
+    check(repeated_busy.actions.empty(), "repeated busy while already active must not replay remote restore commands");
+    check(!repeated_busy.deadline_changed, "repeated busy must not mutate deadline state");
+}
+
+void test_device_coordinator_initial_active_reconciliation_runs_once() {
+    DeviceCoordinatorCore core(60min, true);
+    const auto t0 = Clock::time_point{};
+    const auto first_busy = core.onEvent(DeviceLifecycleEvent::UserBusy, t0);
+    check(contains_action(first_busy, DeviceAction::SamsungPowerOn),
+          "first active event after service start must reconcile Samsung");
+    check(contains_action(first_busy, DeviceAction::VizioWake),
+          "first active event after service start must reconcile Vizio");
+    const auto repeated_busy = core.onEvent(DeviceLifecycleEvent::UserBusy, t0 + 1s);
+    check(repeated_busy.actions.empty(),
+          "second active event after startup reconciliation must be idempotent");
 }
 
 void test_device_coordinator_extended_idle_orders_samsung_restore_before_poweroff() {
@@ -223,6 +299,10 @@ void test_device_coordinator_topology_safe_displayoff_and_shutdown() {
     check(contains_action(shutdown, DeviceAction::SamsungPowerOff), "shutdown must power Samsung off");
     check(contains_action(shutdown, DeviceAction::VizioPowerOff), "shutdown must power Vizio off");
     check(!shutdown.deadline.has_value(), "shutdown must cancel extended idle deadline");
+
+    const auto resume = core.onEvent(DeviceLifecycleEvent::Resume, t0 + 2min);
+    check(contains_action(resume, DeviceAction::SamsungPowerOn), "resume after shutdown must restore Samsung");
+    check(contains_action(resume, DeviceAction::VizioWake), "resume after shutdown must restore Vizio");
 }
 
 void test_external_tv_settings_round_trip_and_redaction() {
@@ -261,10 +341,16 @@ int main() {
     test_samsung_restore_pictureoff_preserves_selection();
     test_samsung_restart_safe_unknown_menu_restore();
     test_samsung_power_toggle_is_state_guarded();
+    test_samsung_channel_authorization_frames();
     test_vizio_blank_is_distinct_from_poweroff();
     test_vizio_smartcast_power_value_mapping();
+    test_vizio_power_off_command_is_state_guarded();
+    test_vizio_wake_is_state_aware();
+    test_vizio_key_payload_matches_pyvizio_shape();
+    test_vizio_smartcast_hashval_preserves_unsigned_32_bit_range();
     test_pictureoff_does_not_invent_menu_open_after_restart();
     test_device_coordinator_maps_idle_and_busy();
+    test_device_coordinator_initial_active_reconciliation_runs_once();
     test_device_coordinator_extended_idle_orders_samsung_restore_before_poweroff();
     test_device_coordinator_topology_safe_displayoff_and_shutdown();
     test_external_tv_settings_round_trip_and_redaction();

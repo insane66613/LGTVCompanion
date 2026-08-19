@@ -1,5 +1,9 @@
 #pragma once
 
+#include <cstdint>
+#include <optional>
+#include <string>
+
 enum class VizioPowerState {
     Unknown,
     Off,
@@ -17,6 +21,12 @@ enum class VizioAction {
 class VizioController {
 public:
     static VizioPowerState fromSmartCastPowerValue(int value) noexcept;
+    static bool shouldSendPowerOff(VizioPowerState state) noexcept;
+    static bool shouldRetryPowerOffAfterVerification(VizioPowerState initial_state,
+                                                     VizioPowerState verified_state) noexcept;
+    static VizioAction planWakeForObservedPowerState(VizioPowerState state) noexcept;
+    static std::string smartCastKeyPayload(int codeset, int code);
+    static std::optional<std::uint64_t> smartCastHashValFromJson(const std::string& response) noexcept;
 
     void observeState(VizioPowerState power, bool blanked) noexcept;
 

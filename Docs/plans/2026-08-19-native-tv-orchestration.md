@@ -110,3 +110,31 @@
 - [ ] Fan in the feature branch, commit all intended changes, push the intended fork remote(s), and verify remote heads.
 - [ ] Verify clean worktree and remove the temporary worktree/branch when safe.
 - [ ] Preserve `X:\Code\TVCODE` as a historical/reference implementation.
+
+
+## Implementation and live-cutover record — 2026-08-19
+
+Native orchestration was validated against the production Samsung and Vizio sets before retiring TVCODE startup ownership. The final full-solution Release/x64 service artifact was deployed after the final idempotency review fix and has SHA-256 `1ABBF8AF26677260B147C6AC676319785E3A896E1C72E254B53D0D3E7211AFEB`, matching the installed `LGTVsvc.exe` byte-for-byte.
+
+Live accelerated parity used a temporary one-minute extended-idle interval. Starting from Samsung standby and Vizio off, `userbusy` restored both sets to `on`; `useridle` armed one fixed deadline; expiry produced Samsung `standby` and Vizio `off`; the following `userbusy` restored both to `on`. Production configuration was then restored to `ExtendedIdleMinutes=60` with native orchestration enabled.
+
+### On-device protocol findings
+
+- Samsung QN75Q60CAFXZA accepts a WebSocket connection before the remote-control channel is authorized. A successful socket write is not proof of key delivery. Native Tizen control now waits for `ms.channel.connect` and rejects `ms.channel.unauthorized` before sending any key.
+- Samsung `KEY_POWEROFF` remains unsuitable for this set; guarded `KEY_POWER` is used only from proven powered states. The authorization fix changed the native test from `on -> accepted -> on` to `on -> accepted -> standby`.
+- Samsung `pictureoff` remains a powered/blanked state, not standby. Persistent Screen Off Mode is reconciled before the extended-idle power toggle.
+- Vizio SmartCast `HASHVAL` can exceed signed 32-bit range; the observed value `3453326231` requires unsigned preservation.
+- Vizio `POW_OFF` is toggle-like on this set when repeated blindly. The native implementation therefore sends it only from verified `On` state and suppresses it for `Off` or `Unknown`.
+- After prolonged SmartCast blanking, this Vizio can acknowledge a key command while discarding the queued action. The proven native envelope includes pyvizio-compatible `_url` metadata, ordinary HTTP/1.1 client headers, a two-second post-response settle window for `/key_command/`, and socket teardown without TLS `close_notify` on that endpoint.
+- The first long-blank `POW_OFF` may still be discarded. One additional `POW_OFF` is permitted only after the complete verification window still proves `On`; the retry is suppressed immediately for `Off` or `Unknown`. This produced the final service transition to verified `off` without blind toggling.
+- A powered-off Vizio may acknowledge BACK without waking. Busy/resume therefore probes power first: verified `Off` selects native WOL/power-on; verified `On` selects BACK/unblank; unknown state remains conservative and is re-probed before accepting recovery.
+- Repeated lifecycle events are idempotent at the device-plan layer. Repeated idle preserves the first monotonic deadline and emits no additional blank commands; a restore-needed latch allows one startup/post-idle/post-power-off reconciliation and suppresses subsequent busy/display-on/resume remote commands until another restore is actually needed.
+
+### Cutover and rollback
+
+- Runtime device credentials were migrated into `LGTV Companion -> ExternalTVOrchestration` without logging them; diagnostic serialization remains redacted.
+- Windows topology preservation is enforced by the native PowrProf adapter with AC/DC display timeout set to Never when the feature is enabled.
+- `tv_control.ahk` and `pipe_reader.ahk` are no longer running and no longer own startup behavior.
+- The former user Startup shortcut `ToggleMonitor.lnk` was removed only after its SHA-256 matched the rollback copy in `X:\Code\TVCODE\Archive\Backups\LGTVCompanion-native-cutover-20260819-100458`.
+- The disabled legacy scheduled task `sam`, which launched `N:\Code\TVCODE\samsung.ahk`, was exported as `scheduled-task-sam.xml` into the same rollback bundle and then removed.
+- TVCODE remains preserved as historical/reference source; it is not part of the active orchestration path.
