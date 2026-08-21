@@ -160,6 +160,12 @@
 #define IDC_EXTTV_VIZIO_ON              1105
 #define IDC_EXTTV_VIZIO_OFF             1106
 #define IDC_EXTTV_STATUS                1107
+#define IDC_EXTTV_REFRESH               1108
+#define IDC_EXTTV_SIM_USER_IDLE         1109
+#define IDC_EXTTV_SIM_USER_BUSY         1110
+#define IDC_EXTTV_SIM_EXTENDED_IDLE     1111
+#define IDC_EXTTV_SIM_SUSPEND           1112
+#define IDC_EXTTV_SIM_SHUTDOWN          1113
 #define ID_ADD_MANAGE                   32771
 #define ID_ADD_MANAGE32772              32772
 #define ID_ADD_REMOVE                   32773
@@ -186,7 +192,7 @@
 #define _APS_NO_MFC                     1
 #define _APS_NEXT_RESOURCE_VALUE        157
 #define _APS_NEXT_COMMAND_VALUE         32788
-#define _APS_NEXT_CONTROL_VALUE         1108
+#define _APS_NEXT_CONTROL_VALUE         1114
 #define _APS_NEXT_SYMED_VALUE           110
 #endif
 #endif

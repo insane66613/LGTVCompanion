@@ -7,6 +7,46 @@ DeviceCoordinatorCore::DeviceCoordinatorCore(
       preserve_desktop_topology_on_idle_(preserve_desktop_topology_on_idle) {
 }
 
+DeviceCoordinatorCoreSnapshot DeviceCoordinatorCore::snapshot() const noexcept {
+    return {idle_.state(), idle_.deadline(), restore_needed_};
+}
+
+DevicePlanPreview DeviceCoordinatorCore::previewEvent(
+    DeviceLifecycleEvent event, IdleCoordinator::TimePoint now) const {
+    auto copy = *this;
+
+    // Diagnostic scenarios exercise the production transition from the
+    // meaningful precondition rather than becoming a no-op because the live
+    // coordinator already happens to be in the target state. All normalization
+    // happens on the copy and therefore cannot mutate live orchestration state.
+    if (event == DeviceLifecycleEvent::UserIdle &&
+        copy.idle_.state() != IdleCoordinator::State::Active) {
+        copy.onEvent(DeviceLifecycleEvent::UserBusy, now);
+    } else if (event == DeviceLifecycleEvent::UserBusy &&
+               copy.idle_.state() == IdleCoordinator::State::Active) {
+        copy.onEvent(DeviceLifecycleEvent::UserIdle, now);
+    }
+
+    auto plan = copy.onEvent(event, now);
+    return {std::move(plan), copy.snapshot()};
+}
+
+DevicePlanPreview DeviceCoordinatorCore::previewExtendedIdle(
+    IdleCoordinator::TimePoint now) const {
+    auto copy = *this;
+    if (copy.idle_.state() == IdleCoordinator::State::ExtendedIdle)
+        copy.onEvent(DeviceLifecycleEvent::UserBusy, now);
+    if (copy.idle_.state() == IdleCoordinator::State::Active)
+        copy.onEvent(DeviceLifecycleEvent::UserIdle, now);
+
+    DevicePlan plan;
+    if (copy.idle_.state() == IdleCoordinator::State::Idle) {
+        const auto due = copy.idle_.deadline().value_or(now);
+        plan = copy.onDeadline(due);
+    }
+    return {std::move(plan), copy.snapshot()};
+}
+
 DevicePlan DeviceCoordinatorCore::shortIdle(IdleCoordinator::TimePoint now) {
     DevicePlan plan;
     const bool first_idle = idle_.onIdle(now);

@@ -5,11 +5,12 @@
 using namespace std::chrono_literals;
 
 void SamsungController::observePowerState(SamsungPowerState state) noexcept {
-    // Picture Off is positive evidence that persistent Screen Off Mode is active,
-    // but it is not evidence that the Accessibility overlay is still open. The
-    // Q60C may close/recreate that UI while blanking, and a user can also change
-    // the mode from the TV itself. Never carry cached menu-open knowledge across
-    // Picture Off or an externally observed PictureOff -> On transition.
+    // Picture Off proves the persistent mode is active, but the Accessibility
+    // overlay itself is no longer trustworthy. Hardware verification on the
+    // Q60C shows that restoring from PictureOff must wake the picture and then
+    // explicitly reopen Accessibility before toggling Screen Off Mode disabled.
+    // Likewise, an externally observed PictureOff -> On transition invalidates
+    // any cached menu state.
     const auto previous_state = power_state_;
     if (state == SamsungPowerState::PictureOff ||
         (previous_state == SamsungPowerState::PictureOff && state == SamsungPowerState::On)) {

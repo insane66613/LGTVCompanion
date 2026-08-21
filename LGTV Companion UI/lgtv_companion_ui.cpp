@@ -171,7 +171,6 @@ int										i_top_configuration_display;
 bool									reset_api_keys = false;
 std::vector<Preferences::ProcessList>	process_list_temp;
 std::shared_ptr<IpcClient2>				p_pipe_client;
-std::shared_ptr<IpcClient2>				p_external_tv_pipe_client;
 std::shared_ptr<Logging>				logger;
 UINT									custom_daemon_restart_message;
 UINT									custom_daemon_idle_message;
@@ -296,10 +295,9 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance,
 
 	
 
-	// Initiate PipeClient IPC
+	// Initiate the existing duplex PipeClient IPC. External-TV diagnostics use
+	// the same transport and are discriminated by their namespaced JSON envelope.
 	p_pipe_client = std::make_shared<IpcClient2>(PIPENAME, ipcCallback, (LPVOID)NULL);
-	p_external_tv_pipe_client = std::make_shared<IpcClient2>(
-		PIPENAME_EXTERNAL_TV_DIAGNOSTICS, externalTvDiagnosticIpcCallback, (LPVOID)NULL, true);
 	h_backbrush = CreateSolidBrush(0x00ffffff);
 	h_edit_small_font = CreateFont(18, 0, 0, 0, FW_DONTCARE, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_OUTLINE_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, VARIABLE_PITCH, TEXT("Calibri"));
 
@@ -1706,7 +1704,9 @@ constexpr UINT kExternalTvDiagnosticTimeoutMs = 90000;
 constexpr int kExternalTvDiagnosticButtons[] = {
 	IDC_EXTTV_SAMSUNG_PROBE, IDC_EXTTV_SAMSUNG_BLANK, IDC_EXTTV_SAMSUNG_UNBLANK,
 	IDC_EXTTV_SAMSUNG_ON, IDC_EXTTV_SAMSUNG_OFF, IDC_EXTTV_VIZIO_PROBE,
-	IDC_EXTTV_VIZIO_BLANK, IDC_EXTTV_VIZIO_UNBLANK, IDC_EXTTV_VIZIO_ON, IDC_EXTTV_VIZIO_OFF
+	IDC_EXTTV_VIZIO_BLANK, IDC_EXTTV_VIZIO_UNBLANK, IDC_EXTTV_VIZIO_ON, IDC_EXTTV_VIZIO_OFF,
+	IDC_EXTTV_REFRESH, IDC_EXTTV_SIM_USER_IDLE, IDC_EXTTV_SIM_USER_BUSY,
+	IDC_EXTTV_SIM_EXTENDED_IDLE, IDC_EXTTV_SIM_SUSPEND, IDC_EXTTV_SIM_SHUTDOWN
 };
 
 void enableExternalTvDiagnosticButtons(HWND hWnd, bool enabled)
@@ -1734,13 +1734,9 @@ void queueExternalTvDiagnosticResponse(const ExternalTvDiagnosticResponse& respo
 		PostMessage(h_external_tv_wnd, APP_EXTERNAL_TV_DIAGNOSTIC, 0, 0);
 }
 
-void startExternalTvDiagnostic(HWND hWnd, ExternalTvDiagnosticDevice device,
-	ExternalTvDiagnosticOperation operation)
+void startExternalTvDiagnostic(HWND hWnd, ExternalTvDiagnosticRequest request)
 {
-	ExternalTvDiagnosticRequest request;
 	request.request_id = nextExternalTvRequestId();
-	request.device = device;
-	request.operation = operation;
 	{
 		std::lock_guard<std::mutex> lock(external_tv_diagnostic_mutex_);
 		if (external_tv_pending_request_)
@@ -1751,10 +1747,10 @@ void startExternalTvDiagnostic(HWND hWnd, ExternalTvDiagnosticDevice device,
 	enableExternalTvDiagnosticButtons(hWnd, false);
 	SetTimer(hWnd, kExternalTvDiagnosticTimeoutTimer, kExternalTvDiagnosticTimeoutMs, nullptr);
 	const std::wstring pending = L"Request " + tools::widen(request.request_id) +
-		L" queued. Diagnostics use the currently applied service configuration.";
+		L" queued on the existing service IPC. Diagnostics use the currently applied service configuration.";
 	SetDlgItemText(hWnd, IDC_EXTTV_STATUS, pending.c_str());
 
-	auto client = p_external_tv_pipe_client;
+	auto client = p_pipe_client;
 	std::thread([client, request]() {
 		const std::wstring command = tools::widen(request.toJson().dump());
 		int remaining_ms = 1000;
@@ -1769,6 +1765,7 @@ void startExternalTvDiagnostic(HWND hWnd, ExternalTvDiagnosticDevice device,
 		{
 			ExternalTvDiagnosticResponse response;
 			response.request_id = request.request_id;
+			response.action = request.action;
 			response.device = request.device;
 			response.operation = request.operation;
 			response.message = "Service IPC is unavailable";
@@ -1777,17 +1774,71 @@ void startExternalTvDiagnostic(HWND hWnd, ExternalTvDiagnosticDevice device,
 	}).detach();
 }
 
+void startExternalTvDiagnostic(HWND hWnd, ExternalTvDiagnosticDevice device,
+	ExternalTvDiagnosticOperation operation)
+{
+	ExternalTvDiagnosticRequest request;
+	request.action = ExternalTvDiagnosticAction::DeviceOperation;
+	request.device = device;
+	request.operation = operation;
+	startExternalTvDiagnostic(hWnd, std::move(request));
+}
+
+void startExternalTvDiagnostic(HWND hWnd, ExternalTvDiagnosticAction action)
+{
+	ExternalTvDiagnosticRequest request;
+	request.action = action;
+	startExternalTvDiagnostic(hWnd, std::move(request));
+}
+
+std::wstring joinDiagnosticActions(const std::vector<std::string>& actions)
+{
+	if (actions.empty()) return L"none";
+	std::wstring result;
+	for (const auto& action : actions)
+	{
+		if (!result.empty()) result += L", ";
+		result += tools::widen(action);
+	}
+	return result;
+}
+
 std::wstring externalTvDiagnosticSummary(const ExternalTvDiagnosticResponse& response)
 {
 	std::wostringstream out;
-	out << L"Request: " << tools::widen(response.request_id) << L"\r\n"
-		<< L"Device: " << tools::widen(externalTvDiagnosticDeviceName(response.device))
-		<< L" | Operation: " << tools::widen(externalTvDiagnosticOperationName(response.operation)) << L"\r\n"
+	out << L"Request: " << tools::widen(response.request_id)
+		<< L" | Action: " << tools::widen(externalTvDiagnosticActionName(response.action)) << L"\r\n"
 		<< L"Accepted: " << (response.accepted ? L"yes" : L"no")
 		<< L" | Executed: " << (response.executed ? L"yes" : L"no")
 		<< L" | Verified: " << (response.verified ? L"yes" : L"no")
-		<< L" | State: " << tools::widen(response.resulting_state) << L"\r\n"
-		<< tools::widen(response.message);
+		<< L" | State: " << tools::widen(response.resulting_state) << L"\r\n";
+
+	if (response.action == ExternalTvDiagnosticAction::DeviceOperation)
+	{
+		out << L"Device: " << tools::widen(externalTvDiagnosticDeviceName(response.device))
+			<< L" | Operation: " << tools::widen(externalTvDiagnosticOperationName(response.operation)) << L"\r\n";
+	}
+	else if (response.snapshot)
+	{
+		const auto& snapshot = *response.snapshot;
+		out << L"Service: " << (snapshot.service_running ? L"running" : L"stopped")
+			<< L" | Orchestration: " << (snapshot.orchestration_enabled ? L"enabled" : L"disabled")
+			<< L" | Idle: " << tools::widen(snapshot.idle_state)
+			<< L" | Deadline: " << (snapshot.deadline_pending ? std::to_wstring(snapshot.deadline_remaining_seconds) + L"s" : L"none") << L"\r\n"
+			<< L"Samsung: " << tools::widen(snapshot.samsung_state)
+			<< L" (token " << (snapshot.samsung_token_present ? L"stored" : L"missing") << L")"
+			<< L" | Vizio: " << tools::widen(snapshot.vizio_state)
+			<< L" (auth " << (snapshot.vizio_auth_present ? L"stored" : L"missing") << L")\r\n";
+	}
+	else if (response.simulation)
+	{
+		const auto& simulation = *response.simulation;
+		out << L"Plan state: " << tools::widen(simulation.lifecycle_state)
+			<< L" | Deadline: " << (simulation.deadline_pending ? std::to_wstring(simulation.deadline_remaining_seconds) + L"s" : L"none") << L"\r\n"
+			<< L"Samsung: " << joinDiagnosticActions(simulation.samsung_actions)
+			<< L" | Vizio: " << joinDiagnosticActions(simulation.vizio_actions) << L"\r\n";
+	}
+	out << tools::widen(response.message);
 	return out.str();
 }
 
@@ -1854,7 +1905,8 @@ LRESULT CALLBACK WndExternalTvProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 		SetDlgItemText(hWnd, IDC_EXTTV_VIZIO_MAC, tools::widen(Prefs.external_tv_.vizio.mac).c_str());
 		SetDlgItemText(hWnd, IDC_EXTTV_SAMSUNG_TOKEN_STATUS, Prefs.external_tv_.samsung.token.empty() ? L"Stored: no" : L"Stored: yes");
 		SetDlgItemText(hWnd, IDC_EXTTV_VIZIO_AUTH_STATUS, Prefs.external_tv_.vizio.auth.empty() ? L"Stored: no" : L"Stored: yes");
-		SetDlgItemText(hWnd, IDC_EXTTV_STATUS, L"Diagnostics use the currently applied service configuration. Apply Global Settings after configuration changes before testing.");
+		SetDlgItemText(hWnd, IDC_EXTTV_STATUS, L"Loading service-owned external-TV state...");
+		startExternalTvDiagnostic(hWnd, ExternalTvDiagnosticAction::Snapshot);
 		return TRUE;
 	}
 	case APP_EXTERNAL_TV_DIAGNOSTIC:
@@ -1891,6 +1943,7 @@ LRESULT CALLBACK WndExternalTvProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 			{
 				ExternalTvDiagnosticResponse response;
 				response.request_id = request->request_id;
+				response.action = request->action;
 				response.device = request->device;
 				response.operation = request->operation;
 				response.message = "Timed out waiting for a diagnostic response from the service";
@@ -1912,6 +1965,12 @@ LRESULT CALLBACK WndExternalTvProc(HWND hWnd, UINT message, WPARAM wParam, LPARA
 		case IDC_EXTTV_VIZIO_UNBLANK: startExternalTvDiagnostic(hWnd, ExternalTvDiagnosticDevice::Vizio, ExternalTvDiagnosticOperation::Unblank); return TRUE;
 		case IDC_EXTTV_VIZIO_ON: startExternalTvDiagnostic(hWnd, ExternalTvDiagnosticDevice::Vizio, ExternalTvDiagnosticOperation::PowerOn); return TRUE;
 		case IDC_EXTTV_VIZIO_OFF: startExternalTvDiagnostic(hWnd, ExternalTvDiagnosticDevice::Vizio, ExternalTvDiagnosticOperation::PowerOff); return TRUE;
+		case IDC_EXTTV_REFRESH: startExternalTvDiagnostic(hWnd, ExternalTvDiagnosticAction::Snapshot); return TRUE;
+		case IDC_EXTTV_SIM_USER_IDLE: startExternalTvDiagnostic(hWnd, ExternalTvDiagnosticAction::SimulateUserIdle); return TRUE;
+		case IDC_EXTTV_SIM_USER_BUSY: startExternalTvDiagnostic(hWnd, ExternalTvDiagnosticAction::SimulateUserBusy); return TRUE;
+		case IDC_EXTTV_SIM_EXTENDED_IDLE: startExternalTvDiagnostic(hWnd, ExternalTvDiagnosticAction::SimulateExtendedIdle); return TRUE;
+		case IDC_EXTTV_SIM_SUSPEND: startExternalTvDiagnostic(hWnd, ExternalTvDiagnosticAction::SimulateSuspend); return TRUE;
+		case IDC_EXTTV_SIM_SHUTDOWN: startExternalTvDiagnostic(hWnd, ExternalTvDiagnosticAction::SimulateShutdown); return TRUE;
 		case IDOK:
 			if (!saveExternalTvDialogSettings(hWnd)) return TRUE;
 			EnableWindow(GetDlgItem(GetParent(hWnd), IDOK), true);
@@ -4006,17 +4065,20 @@ bool messageDaemon(std::wstring cmdline)
 
 void ipcCallback(std::wstring message, LPVOID pt)
 {
-	// Legacy External API responses are intentionally unchanged.
-	return;
-}
-
-void externalTvDiagnosticIpcCallback(std::wstring message, LPVOID pt)
-{
+	// Legacy External API responses remain ignored by this UI callback. Only the
+	// namespaced external-TV response envelope is consumed from the shared pipe.
+	bool external_tv_response = false;
 	try
 	{
+		const auto node = nlohmann::json::parse(tools::narrow(message));
+		external_tv_response = node.is_object() &&
+			node.value("type", std::string{}) == "response" &&
+			node.value("namespace", std::string{}) == "external_tv";
+		if (!external_tv_response)
+			return;
+
 		std::string parse_error;
-		const auto response = ExternalTvDiagnosticResponse::fromJson(
-			nlohmann::json::parse(tools::narrow(message)), &parse_error);
+		const auto response = ExternalTvDiagnosticResponse::fromJson(node, &parse_error);
 		if (response)
 		{
 			queueExternalTvDiagnosticResponse(*response);
@@ -4025,7 +4087,11 @@ void externalTvDiagnosticIpcCallback(std::wstring message, LPVOID pt)
 	}
 	catch (...)
 	{
+		return;
 	}
+
+	if (!external_tv_response)
+		return;
 
 	std::optional<ExternalTvDiagnosticRequest> request;
 	{
@@ -4037,6 +4103,7 @@ void externalTvDiagnosticIpcCallback(std::wstring message, LPVOID pt)
 
 	ExternalTvDiagnosticResponse malformed;
 	malformed.request_id = request->request_id;
+	malformed.action = request->action;
 	malformed.device = request->device;
 	malformed.operation = request->operation;
 	malformed.message = "Malformed diagnostic response from service";

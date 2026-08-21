@@ -13,6 +13,7 @@ namespace {
 ExternalTvDiagnosticResponse baseResponse(const ExternalTvDiagnosticRequest& request) {
     ExternalTvDiagnosticResponse response;
     response.request_id = request.request_id;
+    response.action = request.action;
     response.device = request.device;
     response.operation = request.operation;
     return response;
@@ -36,6 +37,35 @@ const char* vizioStateName(VizioPowerState state) {
     }
 }
 
+const char* idleStateName(IdleCoordinator::State state) {
+    switch (state) {
+    case IdleCoordinator::State::Active: return "active";
+    case IdleCoordinator::State::Idle: return "idle";
+    case IdleCoordinator::State::ExtendedIdle: return "extended_idle";
+    }
+    return "unknown";
+}
+
+const char* deviceActionName(DeviceAction action) {
+    switch (action) {
+    case DeviceAction::SamsungEnableScreenOff: return "screen_off";
+    case DeviceAction::SamsungRestoreScreenOff: return "restore_screen";
+    case DeviceAction::SamsungPowerOn: return "power_on";
+    case DeviceAction::SamsungPowerOff: return "power_off";
+    case DeviceAction::VizioBlankPanel: return "blank";
+    case DeviceAction::VizioWake: return "wake";
+    case DeviceAction::VizioPowerOff: return "power_off";
+    }
+    return "unknown";
+}
+
+std::int64_t remainingSeconds(const std::optional<IdleCoordinator::TimePoint>& deadline,
+                              IdleCoordinator::TimePoint now) {
+    if (!deadline) return 0;
+    const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(*deadline - now).count();
+    return remaining > 0 ? remaining : 0;
+}
+
 std::string redactSecret(std::string message, const std::string& secret) {
     if (secret.empty()) return message;
     std::size_t pos = 0;
@@ -52,27 +82,112 @@ void DeviceCoordinator::runDiagnostic(ExternalTvDiagnosticRequest request, Diagn
     ExternalTvDiagnosticResponse rejected = baseResponse(request);
     {
         std::lock_guard<std::mutex> admission_lock(admission_mutex_);
-        if (!settings_.enabled || stopped_) {
-            rejected.message = stopped_ ? "External-TV coordinator is stopping" : "External-TV orchestration is disabled";
+        if (stopped_) {
+            rejected.message = "External-TV coordinator is stopping";
+        } else if (request.action != ExternalTvDiagnosticAction::DeviceOperation) {
+            boost::asio::post(control_ioc_,
+                [this, request = std::move(request), callback = std::move(callback)]() mutable {
+                    callback(runCoordinatorDiagnostic(request));
+                });
+            return;
+        } else if (!settings_.enabled) {
+            rejected.message = "External-TV orchestration is disabled";
         } else if (request.device == ExternalTvDiagnosticDevice::Samsung && !samsung_transport_) {
             rejected.message = "Samsung external-TV control is disabled";
         } else if (request.device == ExternalTvDiagnosticDevice::Vizio && !vizio_transport_) {
             rejected.message = "Vizio external-TV control is disabled";
         } else {
-            rejected.accepted = true;
             if (request.device == ExternalTvDiagnosticDevice::Samsung) {
-                boost::asio::post(samsung_strand_, [this, request = std::move(request), callback = std::move(callback)]() mutable {
-                    callback(runSamsungDiagnostic(request));
-                });
+                boost::asio::post(samsung_strand_,
+                    [this, request = std::move(request), callback = std::move(callback)]() mutable {
+                        callback(runSamsungDiagnostic(request));
+                    });
             } else {
-                boost::asio::post(vizio_strand_, [this, request = std::move(request), callback = std::move(callback)]() mutable {
-                    callback(runVizioDiagnostic(request));
-                });
+                boost::asio::post(vizio_strand_,
+                    [this, request = std::move(request), callback = std::move(callback)]() mutable {
+                        callback(runVizioDiagnostic(request));
+                    });
             }
             return;
         }
     }
     callback(std::move(rejected));
+}
+
+ExternalTvDiagnosticResponse DeviceCoordinator::runCoordinatorDiagnostic(
+    const ExternalTvDiagnosticRequest& request) {
+    auto response = baseResponse(request);
+    response.accepted = true;
+    response.executed = true;
+    response.verified = true;
+
+    const auto now = IdleCoordinator::Clock::now();
+    if (request.action == ExternalTvDiagnosticAction::Snapshot) {
+        const auto core_snapshot = core_.snapshot();
+        ExternalTvDiagnosticSnapshot snapshot;
+        snapshot.service_running = !stopped_.load();
+        snapshot.orchestration_enabled = settings_.enabled;
+        snapshot.idle_state = idleStateName(core_snapshot.idle_state);
+        snapshot.deadline_pending = core_snapshot.deadline.has_value();
+        snapshot.deadline_remaining_seconds = remainingSeconds(core_snapshot.deadline, now);
+        snapshot.samsung_state = samsungStateName(samsung_observed_state_.load());
+        snapshot.vizio_state = vizioStateName(vizio_observed_state_.load());
+        snapshot.samsung_token_present = !settings_.samsung.token.empty();
+        snapshot.vizio_auth_present = !settings_.vizio.auth.empty();
+        response.resulting_state = snapshot.idle_state;
+        response.snapshot = std::move(snapshot);
+        response.message = "Read-only external-TV coordinator snapshot";
+        return response;
+    }
+
+    DevicePlanPreview preview;
+    switch (request.action) {
+    case ExternalTvDiagnosticAction::SimulateUserIdle:
+        preview = core_.previewEvent(DeviceLifecycleEvent::UserIdle, now);
+        break;
+    case ExternalTvDiagnosticAction::SimulateUserBusy:
+        preview = core_.previewEvent(DeviceLifecycleEvent::UserBusy, now);
+        break;
+    case ExternalTvDiagnosticAction::SimulateExtendedIdle:
+        preview = core_.previewExtendedIdle(now);
+        break;
+    case ExternalTvDiagnosticAction::SimulateSuspend:
+        preview = core_.previewEvent(DeviceLifecycleEvent::Suspend, now);
+        break;
+    case ExternalTvDiagnosticAction::SimulateShutdown:
+        preview = core_.previewEvent(DeviceLifecycleEvent::Shutdown, now);
+        break;
+    default:
+        response.accepted = response.executed = response.verified = false;
+        response.resulting_state = "unknown";
+        response.message = "Unsupported coordinator diagnostic action";
+        return response;
+    }
+
+    ExternalTvLifecycleSimulation simulation;
+    simulation.lifecycle_state = idleStateName(preview.after.idle_state);
+    simulation.deadline_pending = preview.after.deadline.has_value();
+    simulation.deadline_remaining_seconds = remainingSeconds(preview.after.deadline, now);
+    simulation.would_mark_success_if_operations_succeed = true;
+    for (const auto action : preview.plan.actions) {
+        switch (action) {
+        case DeviceAction::SamsungEnableScreenOff:
+        case DeviceAction::SamsungRestoreScreenOff:
+        case DeviceAction::SamsungPowerOn:
+        case DeviceAction::SamsungPowerOff:
+            simulation.samsung_actions.emplace_back(deviceActionName(action));
+            break;
+        case DeviceAction::VizioBlankPanel:
+        case DeviceAction::VizioWake:
+        case DeviceAction::VizioPowerOff:
+            simulation.vizio_actions.emplace_back(deviceActionName(action));
+            break;
+        }
+    }
+    response.resulting_state = simulation.lifecycle_state;
+    response.simulation = std::move(simulation);
+    response.message = "Plan-only lifecycle simulation; live coordinator and Windows power state were not mutated";
+    return response;
 }
 
 ExternalTvDiagnosticResponse DeviceCoordinator::runSamsungDiagnostic(
@@ -82,6 +197,7 @@ ExternalTvDiagnosticResponse DeviceCoordinator::runSamsungDiagnostic(
     std::string error;
     auto probe = [&]() {
         auto state = samsung_transport_->queryPowerState(error);
+        samsung_observed_state_.store(state);
         if (state != SamsungPowerState::Unknown)
             samsung_controller_.observePowerState(state);
         response.resulting_state = samsungStateName(state);
@@ -117,10 +233,17 @@ ExternalTvDiagnosticResponse DeviceCoordinator::runSamsungDiagnostic(
         }
         const auto steps = samsung_controller_.planEnableScreenOff();
         response.executed = executeSamsungSteps(steps);
-        if (response.executed)
-            response.verified = verify([](SamsungPowerState s) { return s == SamsungPowerState::PictureOff; }, 8, 500ms);
-        response.message = response.verified ? "Samsung picture-off verified" :
-            (response.executed ? "Samsung screen-off command executed but picture-off was not verified" : "Samsung screen-off command failed");
+        if (!response.executed) {
+            samsung_controller_.assumeAccessibilityState(SamsungAccessibilityState::Unknown);
+            response.message = "Samsung Screen Off Mode command failed";
+            return response;
+        }
+        // Screen Off Mode is a persistent inactivity policy. Querying power state
+        // immediately after enabling it adds remote activity and can postpone the
+        // transition we are trying to observe. Report transport execution here;
+        // PictureOff is verified separately after a true quiet interval.
+        response.verified = false;
+        response.message = "Samsung Screen Off Mode enabled; PictureOff requires an inactivity interval and is intentionally not polled here";
         return response;
     }
 
@@ -136,10 +259,14 @@ ExternalTvDiagnosticResponse DeviceCoordinator::runSamsungDiagnostic(
         }
         const auto steps = samsung_controller_.planDisableScreenOff();
         response.executed = executeSamsungSteps(steps);
-        if (response.executed)
-            response.verified = verify([](SamsungPowerState s) { return s == SamsungPowerState::On; }, 8, 500ms);
-        response.message = response.verified ? "Samsung unblank verified" :
-            (response.executed ? "Samsung unblank executed but ON state was not verified" : "Samsung unblank command failed");
+        if (!response.executed) {
+            samsung_controller_.assumeAccessibilityState(SamsungAccessibilityState::Unknown);
+            response.message = "Samsung Restore Screen command failed";
+            return response;
+        }
+        response.verified = verify([](SamsungPowerState s) { return s == SamsungPowerState::On; }, 8, 500ms);
+        response.message = response.verified ? "Samsung Restore Screen verified" :
+            "Samsung Restore Screen executed but ON state was not verified";
         return response;
     }
 
@@ -213,6 +340,7 @@ ExternalTvDiagnosticResponse DeviceCoordinator::runVizioDiagnostic(
     std::string error;
     auto probe = [&]() {
         auto state = vizio_transport_->queryPowerState(error);
+        vizio_observed_state_.store(state);
         response.resulting_state = vizioStateName(state);
         return state;
     };
@@ -260,6 +388,7 @@ ExternalTvDiagnosticResponse DeviceCoordinator::runVizioDiagnostic(
         }
         response.executed = vizio_transport_->powerOn(error);
         if (response.executed) {
+            vizio_observed_state_.store(VizioPowerState::On);
             response.resulting_state = "on";
             response.verified = true;
             response.message = "Vizio ON state verified";
@@ -278,6 +407,7 @@ ExternalTvDiagnosticResponse DeviceCoordinator::runVizioDiagnostic(
         }
         response.executed = vizio_transport_->powerOff(error);
         if (response.executed) {
+            vizio_observed_state_.store(VizioPowerState::Off);
             response.resulting_state = "off";
             response.verified = true;
             response.message = "Vizio OFF state verified";

@@ -2,15 +2,18 @@
 #include "../LGTV Companion Service/samsung_controller.h"
 #include "../LGTV Companion Service/vizio_controller.h"
 #include "../LGTV Companion Service/device_coordinator_core.h"
+#include "../LGTV Companion Service/external_tv_transport.h"
 #include "../Common/external_tv_settings.h"
 #include "../Common/external_tv_diagnostics.h"
 
 #include <algorithm>
+#include <boost/asio.hpp>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -112,7 +115,7 @@ void test_samsung_restore_open_awake_menu() {
                "awake known-open restore must ENTER then RETURN");
 }
 
-void test_samsung_restore_pictureoff_reopens_accessibility_before_disable() {
+void test_samsung_restore_pictureoff_invalidates_menu_and_reopens() {
     SamsungController controller;
     controller.observePowerState(SamsungPowerState::On);
     controller.assumeAccessibilityState(SamsungAccessibilityState::OpenEnabled);
@@ -122,9 +125,10 @@ void test_samsung_restore_pictureoff_reopens_accessibility_before_disable() {
     const auto plan = controller.planDisableScreenOff();
     check_keys(plan, {SamsungRemoteKey::Enter, SamsungRemoteKey::Accessibility,
                       SamsungRemoteKey::Enter, SamsungRemoteKey::Return},
-               "pictureoff restore must wake, explicitly reopen Accessibility, disable first item, and close");
+               "pictureoff restore must wake, reopen Accessibility, disable first item, then close");
     check(plan[0].delay_after == 1200ms, "pictureoff wake must wait 1200ms");
     check(plan[1].delay_after == 1400ms, "pictureoff restore must wait after reopening Accessibility");
+    check(plan[2].delay_after == 350ms, "disable toggle must wait 350ms before closing Accessibility");
 }
 
 void test_samsung_external_pictureoff_to_on_invalidates_cached_menu_state() {
@@ -324,6 +328,88 @@ void test_device_coordinator_topology_safe_displayoff_and_shutdown() {
     check(contains_action(resume, DeviceAction::VizioWake), "resume after shutdown must restore Vizio");
 }
 
+void test_device_coordinator_read_only_lifecycle_previews() {
+    DeviceCoordinatorCore core(60min, true);
+    const auto t0 = Clock::time_point{} + 10min;
+    const auto initial = core.snapshot();
+    check(initial.idle_state == IdleCoordinator::State::Active,
+          "fresh coordinator snapshot must report active state");
+    check(!initial.deadline.has_value(), "fresh coordinator snapshot must have no deadline");
+
+    const auto idle = core.previewEvent(DeviceLifecycleEvent::UserIdle, t0);
+    check(idle.after.idle_state == IdleCoordinator::State::Idle,
+          "User Idle preview must report Idle post-state");
+    check(idle.after.deadline == std::optional<Clock::time_point>{t0 + 60min},
+          "User Idle preview must expose the extended-idle deadline");
+    check(contains_action(idle.plan, DeviceAction::SamsungEnableScreenOff) &&
+          contains_action(idle.plan, DeviceAction::VizioBlankPanel),
+          "User Idle preview must reuse production panel-blank policy");
+    check(core.snapshot().idle_state == IdleCoordinator::State::Active &&
+          !core.snapshot().deadline.has_value(),
+          "User Idle preview must not mutate the live coordinator");
+
+    const auto busy = core.previewEvent(DeviceLifecycleEvent::UserBusy, t0 + 1min);
+    check(busy.after.idle_state == IdleCoordinator::State::Active,
+          "User Busy preview must report Active post-state");
+    check(contains_action(busy.plan, DeviceAction::SamsungPowerOn) &&
+          contains_action(busy.plan, DeviceAction::SamsungRestoreScreenOff) &&
+          contains_action(busy.plan, DeviceAction::VizioWake),
+          "User Busy preview must reuse production restore policy");
+
+    const auto extended = core.previewExtendedIdle(t0);
+    check(extended.after.idle_state == IdleCoordinator::State::ExtendedIdle,
+          "Extended Idle preview must report ExtendedIdle post-state");
+    check(contains_action(extended.plan, DeviceAction::VizioPowerOff) &&
+          contains_action(extended.plan, DeviceAction::SamsungRestoreScreenOff) &&
+          contains_action(extended.plan, DeviceAction::SamsungPowerOff),
+          "Extended Idle preview must reuse production full-power-off policy");
+
+    const auto suspend = core.previewEvent(DeviceLifecycleEvent::Suspend, t0 + 2min);
+    check(contains_action(suspend.plan, DeviceAction::VizioPowerOff) &&
+          contains_action(suspend.plan, DeviceAction::SamsungRestoreScreenOff) &&
+          contains_action(suspend.plan, DeviceAction::SamsungPowerOff),
+          "Suspend preview must reuse production full-power-off policy");
+
+    const auto shutdown = core.previewEvent(DeviceLifecycleEvent::Shutdown, t0 + 3min);
+    check(contains_action(shutdown.plan, DeviceAction::VizioPowerOff) &&
+          contains_action(shutdown.plan, DeviceAction::SamsungRestoreScreenOff) &&
+          contains_action(shutdown.plan, DeviceAction::SamsungPowerOff),
+          "Shutdown preview must reuse production full-power-off policy");
+
+    const auto final_state = core.snapshot();
+    check(final_state.idle_state == initial.idle_state && final_state.deadline == initial.deadline,
+          "all lifecycle simulations must be read-only with respect to live coordinator state");
+
+    core.onEvent(DeviceLifecycleEvent::UserIdle, t0);
+    const auto live_idle = core.snapshot();
+    const auto idle_while_idle = core.previewEvent(DeviceLifecycleEvent::UserIdle, t0 + 1min);
+    check(contains_action(idle_while_idle.plan, DeviceAction::SamsungEnableScreenOff) &&
+          contains_action(idle_while_idle.plan, DeviceAction::VizioBlankPanel),
+          "User Idle diagnostic must exercise first-stage blanking even when live state is already Idle");
+    check(core.snapshot().idle_state == live_idle.idle_state && core.snapshot().deadline == live_idle.deadline,
+          "User Idle diagnostic normalization must not mutate live Idle state");
+
+    core.onEvent(DeviceLifecycleEvent::UserBusy, t0 + 2min);
+    const auto live_active = core.snapshot();
+    const auto busy_while_active = core.previewEvent(DeviceLifecycleEvent::UserBusy, t0 + 3min);
+    check(contains_action(busy_while_active.plan, DeviceAction::SamsungPowerOn) &&
+          contains_action(busy_while_active.plan, DeviceAction::SamsungRestoreScreenOff) &&
+          contains_action(busy_while_active.plan, DeviceAction::VizioWake),
+          "User Busy diagnostic must exercise restore behavior even when live state is already Active");
+    check(core.snapshot().idle_state == live_active.idle_state && core.snapshot().deadline == live_active.deadline,
+          "User Busy diagnostic normalization must not mutate live Active state");
+
+    core.onEvent(DeviceLifecycleEvent::UserIdle, t0 + 4min);
+    core.onDeadline(t0 + 64min);
+    const auto already_extended = core.previewExtendedIdle(t0 + 65min);
+    check(contains_action(already_extended.plan, DeviceAction::VizioPowerOff) &&
+          contains_action(already_extended.plan, DeviceAction::SamsungRestoreScreenOff) &&
+          contains_action(already_extended.plan, DeviceAction::SamsungPowerOff),
+          "Extended Idle diagnostic must directly preview the production full-power-off plan even when live state is already ExtendedIdle");
+    check(core.snapshot().idle_state == IdleCoordinator::State::ExtendedIdle,
+          "Extended Idle diagnostic must not alter an already-ExtendedIdle live coordinator");
+}
+
 void test_external_tv_settings_round_trip_and_redaction() {
     nlohmann::json node = {
         {"Enabled", true}, {"PreserveDesktopTopologyOnIdle", true}, {"ExtendedIdleMinutes", 60},
@@ -349,33 +435,49 @@ void test_external_tv_settings_safe_defaults() {
 
 void test_external_tv_diagnostic_request_contract() {
     const nlohmann::json wire = {
-        {"namespace", "external_tv"}, {"request_id", "req-123"},
+        {"type", "external_tv_diagnostic"}, {"namespace", "external_tv"},
+        {"request_id", "req-123"}, {"action", "device_operation"},
         {"device", "samsung"}, {"operation", "power_off"}
     };
     std::string error;
     const auto request = ExternalTvDiagnosticRequest::fromJson(wire, &error);
     check(request.has_value(), "valid external-TV diagnostic request must parse");
     check(request && request->request_id == "req-123", "diagnostic request ID must be preserved");
+    check(request && request->action == ExternalTvDiagnosticAction::DeviceOperation,
+          "device diagnostic request must preserve action selector");
     check(request && request->device == ExternalTvDiagnosticDevice::Samsung,
           "diagnostic request must preserve Samsung selector");
     check(request && request->operation == ExternalTvDiagnosticOperation::PowerOff,
           "diagnostic request must preserve operation");
     check(request && request->toJson() == wire, "diagnostic request must round-trip canonically");
+
+    const nlohmann::json snapshot_wire = {
+        {"type", "external_tv_diagnostic"}, {"namespace", "external_tv"},
+        {"request_id", "req-snapshot"}, {"action", "snapshot"}
+    };
+    const auto snapshot_request = ExternalTvDiagnosticRequest::fromJson(snapshot_wire, &error);
+    check(snapshot_request && snapshot_request->action == ExternalTvDiagnosticAction::Snapshot,
+          "snapshot request must use the normal external-TV diagnostic envelope");
+    check(snapshot_request && snapshot_request->toJson() == snapshot_wire,
+          "snapshot request must not invent physical-device fields");
 }
 
 void test_external_tv_diagnostic_request_rejects_malformed_or_secret_payloads() {
     std::string error;
-    check(!ExternalTvDiagnosticRequest::fromJson({{"namespace", "external_tv"}, {"device", "vizio"}, {"operation", "probe"}}, &error),
+    check(!ExternalTvDiagnosticRequest::fromJson({{"type", "external_tv_diagnostic"}, {"namespace", "external_tv"}, {"action", "snapshot"}}, &error),
           "diagnostic request without request_id must fail closed");
-    check(!ExternalTvDiagnosticRequest::fromJson({{"namespace", "external_tv"}, {"request_id", "r"}, {"device", "vizio"}, {"operation", "shutdown"}}, &error),
-          "unsupported host-like diagnostic operation must fail closed");
-    check(!ExternalTvDiagnosticRequest::fromJson({{"namespace", "external_tv"}, {"request_id", "r"}, {"device", "samsung"}, {"operation", "probe"}, {"Token", "secret"}}, &error),
+    check(!ExternalTvDiagnosticRequest::fromJson({{"type", "external_tv_diagnostic"}, {"namespace", "external_tv"}, {"request_id", "r"}, {"action", "device_operation"}, {"device", "vizio"}, {"operation", "shutdown"}}, &error),
+          "unsupported physical-device operation must fail closed");
+    check(!ExternalTvDiagnosticRequest::fromJson({{"type", "external_tv_diagnostic"}, {"namespace", "external_tv"}, {"request_id", "r"}, {"action", "device_operation"}, {"device", "samsung"}, {"operation", "probe"}, {"Token", "secret"}}, &error),
           "diagnostic IPC must reject credential-bearing fields");
+    check(!ExternalTvDiagnosticRequest::fromJson({{"type", "external_tv_diagnostic"}, {"namespace", "external_tv"}, {"request_id", "r"}, {"action", "snapshot"}, {"device", "samsung"}}, &error),
+          "snapshot request must reject irrelevant device fields");
 }
 
 void test_external_tv_diagnostic_response_contract_and_semantics() {
     ExternalTvDiagnosticResponse response;
     response.request_id = "req-123";
+    response.action = ExternalTvDiagnosticAction::DeviceOperation;
     response.device = ExternalTvDiagnosticDevice::Vizio;
     response.operation = ExternalTvDiagnosticOperation::PowerOn;
     response.accepted = true;
@@ -385,6 +487,7 @@ void test_external_tv_diagnostic_response_contract_and_semantics() {
     response.message = "Power-on verified";
     check(response.semanticsValid(), "verified diagnostic response must require accepted+executed and known resulting state");
     auto wire = response.toJson();
+    check(wire.value("type", "") == "response", "diagnostic result must use the existing duplex response envelope");
     check(wire.value("request_id", "") == "req-123", "diagnostic response must echo request ID");
     check(!wire.contains("Token") && !wire.contains("Auth") && !wire.contains("credential"),
           "diagnostic response must contain no credential fields");
@@ -392,10 +495,109 @@ void test_external_tv_diagnostic_response_contract_and_semantics() {
     const auto parsed = ExternalTvDiagnosticResponse::fromJson(wire, &error);
     check(parsed.has_value() && parsed->matchesRequest("req-123"),
           "diagnostic response must support request-ID correlation");
+    check(parsed && !parsed->matchesRequest("wrong-id"),
+          "mismatched diagnostic response IDs must be rejected by correlation");
 
     wire["executed"] = false;
     check(!ExternalTvDiagnosticResponse::fromJson(wire, &error),
           "verified=true with executed=false must be rejected as impossible semantics");
+}
+
+class BlackholeTcpServer {
+public:
+    BlackholeTcpServer(unsigned short port, std::chrono::milliseconds hold)
+        : acceptor_(ioc_, {boost::asio::ip::address_v4::loopback(), port}),
+          hold_(hold), thread_([this] { run(); }) {}
+
+    ~BlackholeTcpServer() {
+        if (thread_.joinable()) thread_.join();
+    }
+
+private:
+    void run() {
+        boost::asio::ip::tcp::socket socket(ioc_);
+        boost::system::error_code ec;
+        acceptor_.accept(socket, ec);
+        if (!ec) std::this_thread::sleep_for(hold_);
+        socket.close(ec);
+    }
+
+    boost::asio::io_context ioc_;
+    boost::asio::ip::tcp::acceptor acceptor_;
+    std::chrono::milliseconds hold_;
+    std::thread thread_;
+};
+
+void test_external_tv_transport_timeouts_are_bounded() {
+    {
+        BlackholeTcpServer server(8001, 6500ms);
+        SamsungExternalTvSettings settings;
+        settings.ip = "127.0.0.1";
+        SamsungTizenTransport transport(settings);
+        std::string error;
+        const auto started = Clock::now();
+        const auto state = transport.queryPowerState(error);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started);
+        check(state == SamsungPowerState::Unknown,
+              "black-holed Samsung state probe must fail closed to Unknown");
+        check(elapsed < 5500ms,
+              "Samsung state probe timeout must be actively bounded, not depend on peer close");
+    }
+    {
+        BlackholeTcpServer server(7345, 7500ms);
+        VizioExternalTvSettings settings;
+        settings.ip = "127.0.0.1";
+        VizioSmartCastTransport transport(settings);
+        std::string error;
+        const auto started = Clock::now();
+        const auto state = transport.queryPowerState(error);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started);
+        check(state == VizioPowerState::Unknown,
+              "black-holed Vizio TLS probe must fail closed to Unknown");
+        check(elapsed < 6500ms,
+              "Vizio TLS/HTTP timeout must be actively bounded, not depend on peer close");
+    }
+}
+
+void test_external_tv_snapshot_and_simulation_payload_round_trip() {
+    ExternalTvDiagnosticResponse snapshot;
+    snapshot.request_id = "req-snapshot";
+    snapshot.action = ExternalTvDiagnosticAction::Snapshot;
+    snapshot.accepted = snapshot.executed = snapshot.verified = true;
+    snapshot.resulting_state = "idle";
+    snapshot.message = "Read-only coordinator snapshot";
+    snapshot.snapshot = ExternalTvDiagnosticSnapshot{
+        true, true, "idle", true, 123, "pictureoff", "on", true, true};
+    const auto snapshot_wire = snapshot.toJson();
+    check(snapshot_wire.contains("snapshot") && !snapshot_wire.contains("device") &&
+          !snapshot_wire.contains("operation") && snapshot_wire.dump().find("secret") == std::string::npos,
+          "snapshot response must carry structured read-only data without physical-device selectors or credentials");
+    std::string error;
+    const auto parsed_snapshot = ExternalTvDiagnosticResponse::fromJson(snapshot_wire, &error);
+    check(parsed_snapshot && parsed_snapshot->snapshot &&
+          parsed_snapshot->snapshot->deadline_remaining_seconds == 123 &&
+          parsed_snapshot->snapshot->samsung_token_present &&
+          parsed_snapshot->snapshot->vizio_auth_present,
+          "snapshot response must round-trip service/deadline state and credential-presence booleans");
+
+    ExternalTvDiagnosticResponse simulation;
+    simulation.request_id = "req-sim";
+    simulation.action = ExternalTvDiagnosticAction::SimulateShutdown;
+    simulation.accepted = simulation.executed = simulation.verified = true;
+    simulation.resulting_state = "active";
+    simulation.message = "Plan-only simulation; no live state mutated";
+    simulation.simulation = ExternalTvLifecycleSimulation{
+        "active", {"restore_screen_off", "power_off"}, {"power_off"},
+        false, 0, true};
+    const auto simulation_wire = simulation.toJson();
+    check(simulation_wire.contains("simulation") &&
+          simulation_wire["simulation"].value("would_mark_success_if_operations_succeed", false),
+          "simulation response must state the hypothetical success-mark outcome");
+    const auto parsed_simulation = ExternalTvDiagnosticResponse::fromJson(simulation_wire, &error);
+    check(parsed_simulation && parsed_simulation->simulation &&
+          parsed_simulation->simulation->samsung_actions.size() == 2 &&
+          parsed_simulation->simulation->vizio_actions.size() == 1,
+          "simulation response must round-trip deterministic per-device action plans");
 }
 
 }  // namespace
@@ -408,7 +610,7 @@ int main() {
     test_samsung_idle_when_already_pictureoff_is_noop();
     test_samsung_enable_leaves_accessibility_open();
     test_samsung_restore_open_awake_menu();
-    test_samsung_restore_pictureoff_reopens_accessibility_before_disable();
+    test_samsung_restore_pictureoff_invalidates_menu_and_reopens();
     test_samsung_external_pictureoff_to_on_invalidates_cached_menu_state();
     test_samsung_restart_safe_unknown_menu_restore();
     test_samsung_power_toggle_is_state_guarded();
@@ -424,11 +626,14 @@ int main() {
     test_device_coordinator_initial_active_reconciliation_runs_once();
     test_device_coordinator_extended_idle_orders_samsung_restore_before_poweroff();
     test_device_coordinator_topology_safe_displayoff_and_shutdown();
+    test_device_coordinator_read_only_lifecycle_previews();
     test_external_tv_settings_round_trip_and_redaction();
     test_external_tv_settings_safe_defaults();
     test_external_tv_diagnostic_request_contract();
     test_external_tv_diagnostic_request_rejects_malformed_or_secret_payloads();
     test_external_tv_diagnostic_response_contract_and_semantics();
+    test_external_tv_snapshot_and_simulation_payload_round_trip();
+    test_external_tv_transport_timeouts_are_bounded();
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";
         return EXIT_FAILURE;

@@ -28,6 +28,7 @@ public:
 
 private:
     void applyPlan(DevicePlan plan);
+    ExternalTvDiagnosticResponse runCoordinatorDiagnostic(const ExternalTvDiagnosticRequest& request);
     ExternalTvDiagnosticResponse runSamsungDiagnostic(const ExternalTvDiagnosticRequest& request);
     ExternalTvDiagnosticResponse runVizioDiagnostic(const ExternalTvDiagnosticRequest& request);
     void scheduleDeadline(const DevicePlan& plan);
@@ -47,6 +48,8 @@ private:
     boost::asio::strand<boost::asio::thread_pool::executor_type> vizio_strand_{network_pool_.get_executor()};
     std::thread control_thread_;
     std::atomic<bool> stopped_{false};
+    std::atomic<SamsungPowerState> samsung_observed_state_{SamsungPowerState::Unknown};
+    std::atomic<VizioPowerState> vizio_observed_state_{VizioPowerState::Unknown};
     std::mutex admission_mutex_;
     SamsungController samsung_controller_;
     std::unique_ptr<SamsungTizenTransport> samsung_transport_;

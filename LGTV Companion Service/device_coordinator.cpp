@@ -115,6 +115,7 @@ void DeviceCoordinator::executeSamsungActions(std::vector<DeviceAction> actions)
         // plans from entering but does not abandon an in-flight power sequence.
         std::string error;
         auto state = samsung_transport_->queryPowerState(error);
+        samsung_observed_state_.store(state);
         if (state != SamsungPowerState::Unknown)
             samsung_controller_.observePowerState(state);
 
@@ -147,6 +148,7 @@ void DeviceCoordinator::executeSamsungActions(std::vector<DeviceAction> actions)
                 logFailure("Samsung", "WOL", wake_error);
             std::this_thread::sleep_for(2500ms);
             state = samsung_transport_->queryPowerState(error);
+            samsung_observed_state_.store(state);
             if (state != SamsungPowerState::Unknown)
                 samsung_controller_.observePowerState(state);
             if (samsung_controller_.shouldSendPowerToggleForOnFallback()) {
@@ -186,10 +188,12 @@ void DeviceCoordinator::executeVizioActions(std::vector<DeviceAction> actions) {
         case DeviceAction::VizioWake: {
             std::string state_error;
             auto state = vizio_transport_->queryPowerState(state_error);
+            vizio_observed_state_.store(state);
             const auto wake_plan = VizioController::planWakeForObservedPowerState(state);
 
             if (wake_plan == VizioAction::PowerOn) {
                 ok = vizio_transport_->powerOn(error);
+                if (ok) vizio_observed_state_.store(VizioPowerState::On);
                 break;
             }
 
@@ -211,12 +215,14 @@ void DeviceCoordinator::executeVizioActions(std::vector<DeviceAction> actions) {
 
                 std::string after_error;
                 state = vizio_transport_->queryPowerState(after_error);
+                vizio_observed_state_.store(state);
                 if (state == VizioPowerState::On) {
                     ok = true;
                     break;
                 }
                 if (state == VizioPowerState::Off) {
                     ok = vizio_transport_->powerOn(error);
+                    if (ok) vizio_observed_state_.store(VizioPowerState::On);
                     break;
                 }
                 error = "BACK accepted but power state remains unknown: " + after_error;
@@ -227,6 +233,7 @@ void DeviceCoordinator::executeVizioActions(std::vector<DeviceAction> actions) {
         }
         case DeviceAction::VizioPowerOff:
             ok = vizio_transport_->powerOff(error);
+            if (ok) vizio_observed_state_.store(VizioPowerState::Off);
             break;
         default:
             break;

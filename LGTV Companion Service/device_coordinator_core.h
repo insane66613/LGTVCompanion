@@ -31,6 +31,17 @@ struct DevicePlan {
     bool deadline_changed{false};
 };
 
+struct DeviceCoordinatorCoreSnapshot {
+    IdleCoordinator::State idle_state{IdleCoordinator::State::Active};
+    std::optional<IdleCoordinator::TimePoint> deadline;
+    bool restore_needed{true};
+};
+
+struct DevicePlanPreview {
+    DevicePlan plan;
+    DeviceCoordinatorCoreSnapshot after;
+};
+
 class DeviceCoordinatorCore {
 public:
     DeviceCoordinatorCore(IdleCoordinator::Duration extended_idle_delay,
@@ -38,6 +49,9 @@ public:
 
     DevicePlan onEvent(DeviceLifecycleEvent event, IdleCoordinator::TimePoint now);
     DevicePlan onDeadline(IdleCoordinator::TimePoint now);
+    DeviceCoordinatorCoreSnapshot snapshot() const noexcept;
+    DevicePlanPreview previewEvent(DeviceLifecycleEvent event, IdleCoordinator::TimePoint now) const;
+    DevicePlanPreview previewExtendedIdle(IdleCoordinator::TimePoint now) const;
 
 private:
     DevicePlan shortIdle(IdleCoordinator::TimePoint now);

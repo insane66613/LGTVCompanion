@@ -67,7 +67,6 @@ private:
 	std::vector<std::string>							host_ips_;
 	std::shared_ptr<Logging>							log_;
 	std::shared_ptr<IpcServer2>							ipc_server_;
-	std::shared_ptr<IpcServer2>							external_tv_ipc_server_;
 	std::shared_ptr<DeviceCoordinator>				device_coordinator_;
 
 	void												dispatchEvent(Event&);
@@ -82,7 +81,6 @@ private:
 	void												saveTopologyConfiguration(void);
 	std::string											validateDevices(std::vector<std::string>);
 	static void											ipcCallbackStatic(std::wstring message, LPVOID lpFunct);
-	static void											externalTvIpcCallbackStatic(std::wstring message, LPVOID lpFunct);
 	void												ipcCallback(std::wstring message, bool recursive = false);
 	void												externalTvIpcCallback(std::wstring message);
 	void												sendToIpc(DWORD);
@@ -115,11 +113,9 @@ Companion::Impl::Impl(Preferences& settings)
 	file += LOG_FILE;
 	log_ = std::make_shared<Logging>(settings.log_level_, file);
 	ipc_server_ = std::make_shared<IpcServer2>(PIPENAME, &ipcCallbackStatic, (LPVOID)this);
-	external_tv_ipc_server_ = std::make_shared<IpcServer2>(
-		PIPENAME_EXTERNAL_TV_DIAGNOSTICS, &externalTvIpcCallbackStatic, (LPVOID)this, true);
+	device_coordinator_ = std::make_shared<DeviceCoordinator>(prefs_.external_tv_, log_);
 	if (prefs_.external_tv_.enabled)
 	{
-		device_coordinator_ = std::make_shared<DeviceCoordinator>(prefs_.external_tv_, log_);
 		INFO_("ExternalTV", "Native external-TV orchestration enabled");
 		if (prefs_.external_tv_.preserve_desktop_topology_on_idle)
 		{
@@ -766,11 +762,6 @@ std::vector<std::string> Companion::Impl::extractSeparateCommands(std::string st
 	 Companion::Impl* p = (Companion::Impl*)lpFunct;
 	 p->ipcCallback(message);
 }
-void Companion::Impl::externalTvIpcCallbackStatic(std::wstring message, LPVOID lpFunct)
-{
-	Companion::Impl* p = (Companion::Impl*)lpFunct;
-	p->externalTvIpcCallback(std::move(message));
-}
 void Companion::Impl::externalTvIpcCallback(std::wstring message)
 {
 	try
@@ -786,13 +777,14 @@ void Companion::Impl::externalTvIpcCallback(std::wstring message)
 		{
 			ExternalTvDiagnosticResponse response;
 			response.request_id = request->request_id;
+			response.action = request->action;
 			response.device = request->device;
 			response.operation = request->operation;
-			response.message = "External-TV orchestration is disabled";
-			external_tv_ipc_server_->send(tools::widen(response.toJson().dump()));
+			response.message = "External-TV coordinator is unavailable";
+			ipc_server_->send(tools::widen(response.toJson().dump()));
 			return;
 		}
-		auto server = external_tv_ipc_server_;
+		auto server = ipc_server_;
 		device_coordinator_->runDiagnostic(*request, [server](ExternalTvDiagnosticResponse response) {
 			server->send(tools::widen(response.toJson().dump()));
 		});
@@ -822,6 +814,27 @@ void Companion::Impl::ipcCallback(std::wstring message, bool recursive)
 	{
 		ERR_("CLI", "Invalid command line format.Zero length!");
 		return;
+	}
+
+	// External-TV diagnostics share the existing duplex IPC transport but use a
+	// strict namespaced JSON envelope. Legacy CLI/event traffic continues below.
+	if (!recursive && !temp.empty() && temp.front() == '{')
+	{
+		try
+		{
+			const auto node = json::parse(temp);
+			if (node.is_object() &&
+				((node.contains("type") && node["type"].is_string() && node["type"] == "external_tv_diagnostic") ||
+				 (node.contains("namespace") && node["namespace"].is_string() && node["namespace"] == "external_tv")))
+			{
+				externalTvIpcCallback(message);
+				return;
+			}
+		}
+		catch (const std::exception& e)
+		{
+			DEBUG_("IPC", "Non-legacy JSON envelope parse failed: %1%", e.what());
+		}
 	}
 	if (temp.find('-') != 0)
 	{

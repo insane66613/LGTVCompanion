@@ -59,13 +59,35 @@ std::string samsungTarget(const std::string& token) {
     return target;
 }
 
+template <typename StartOperation>
+boost::system::error_code runExternalTvAsync(asio::io_context& ioc, StartOperation&& start) {
+    boost::system::error_code result = asio::error::would_block;
+    bool completed = false;
+    start([&](const boost::system::error_code& ec, auto&&...) {
+        result = ec;
+        completed = true;
+    });
+    ioc.restart();
+    ioc.run();
+    if (!completed) return asio::error::operation_aborted;
+    return result;
+}
+
 template <typename WebSocket>
-bool waitForSamsungAuthorization(WebSocket& ws, std::string& error) {
+bool waitForSamsungAuthorization(WebSocket& ws, asio::io_context& ioc, std::string& error) {
     const auto deadline = std::chrono::steady_clock::now() + 5s;
     beast::flat_buffer buffer;
     while (std::chrono::steady_clock::now() < deadline) {
         beast::get_lowest_layer(ws).expires_at(deadline);
-        ws.read(buffer);
+        const auto ec = runExternalTvAsync(ioc, [&](auto done) {
+            ws.async_read(buffer, std::move(done));
+        });
+        if (ec) {
+            error = ec == beast::error::timeout
+                ? "Samsung authorization timed out"
+                : "Samsung authorization read failed: " + ec.message();
+            return false;
+        }
         const auto message = beast::buffers_to_string(buffer.data());
         buffer.consume(buffer.size());
         const auto authorization = SamsungController::channelAuthorizationFromJson(message);
@@ -80,6 +102,36 @@ bool waitForSamsungAuthorization(WebSocket& ws, std::string& error) {
     }
     error = "Samsung did not send ms.channel.connect before authorization deadline";
     return false;
+}
+
+template <typename WebSocket>
+bool writeSamsungPayload(WebSocket& ws, asio::io_context& ioc,
+                         const std::string& payload, std::string& error) {
+    beast::get_lowest_layer(ws).expires_after(5s);
+    const auto ec = runExternalTvAsync(ioc, [&](auto done) {
+        ws.async_write(asio::buffer(payload), std::move(done));
+    });
+    if (ec) {
+        error = "Samsung key write failed: " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+template <typename WebSocket>
+void closeSamsungWebSocket(WebSocket& ws, asio::io_context& ioc) {
+    auto timeout = websocket::stream_base::timeout::suggested(beast::role_type::client);
+    timeout.handshake_timeout = 1500ms;
+    ws.set_option(timeout);
+    beast::get_lowest_layer(ws).expires_after(1500ms);
+    const auto ec = runExternalTvAsync(ioc, [&](auto done) {
+        ws.async_close(websocket::close_code::normal, std::move(done));
+    });
+    if (ec) {
+        beast::error_code ignored;
+        beast::get_lowest_layer(ws).socket().shutdown(tcp::socket::shutdown_both, ignored);
+        beast::get_lowest_layer(ws).socket().close(ignored);
+    }
 }
 
 bool findStringKey(const nlohmann::json& node, const std::string& key, std::string& value) {
@@ -174,17 +226,44 @@ SamsungPowerState SamsungTizenTransport::queryPowerState(std::string& error) con
         asio::io_context ioc;
         tcp::resolver resolver(ioc);
         beast::tcp_stream stream(ioc);
-        stream.expires_after(4s);
-        stream.connect(resolver.resolve(settings_.ip, "8001"));
+        const auto endpoints = resolver.resolve(settings_.ip, "8001");
+        const auto deadline = std::chrono::steady_clock::now() + 4s;
+
+        stream.expires_at(deadline);
+        auto ec = runExternalTvAsync(ioc, [&](auto done) {
+            stream.async_connect(endpoints, std::move(done));
+        });
+        if (ec) {
+            error = "Samsung state probe connect failed: " + ec.message();
+            return SamsungPowerState::Unknown;
+        }
+
         http::request<http::empty_body> req{http::verb::get, "/api/v2/", 11};
         req.set(http::field::host, settings_.ip);
         req.set(http::field::user_agent, "LGTVCompanion");
-        http::write(stream, req);
+        stream.expires_at(deadline);
+        ec = runExternalTvAsync(ioc, [&](auto done) {
+            http::async_write(stream, req, std::move(done));
+        });
+        if (ec) {
+            error = "Samsung state probe write failed: " + ec.message();
+            return SamsungPowerState::Unknown;
+        }
+
         beast::flat_buffer buffer;
         http::response<http::string_body> res;
-        http::read(stream, buffer, res);
-        beast::error_code ec;
-        stream.socket().shutdown(tcp::socket::shutdown_both, ec);
+        stream.expires_at(deadline);
+        ec = runExternalTvAsync(ioc, [&](auto done) {
+            http::async_read(stream, buffer, res, std::move(done));
+        });
+        if (ec) {
+            error = "Samsung state probe read failed: " + ec.message();
+            return SamsungPowerState::Unknown;
+        }
+
+        beast::error_code ignored;
+        stream.socket().shutdown(tcp::socket::shutdown_both, ignored);
+        stream.socket().close(ignored);
         if (res.result_int() < 200 || res.result_int() >= 300) {
             error = "Samsung state probe HTTP " + std::to_string(res.result_int());
             return SamsungPowerState::Unknown;
@@ -214,15 +293,42 @@ bool SamsungTizenTransport::sendKeyTls(SamsungRemoteKey key, std::string& error)
         ctx.set_verify_mode(ssl::verify_none);
         tcp::resolver resolver(ioc);
         websocket::stream<beast::ssl_stream<beast::tcp_stream>> ws(ioc, ctx);
+        const auto endpoints = resolver.resolve(settings_.ip, "8002");
+
         beast::get_lowest_layer(ws).expires_after(5s);
-        beast::get_lowest_layer(ws).connect(resolver.resolve(settings_.ip, "8002"));
-        ws.next_layer().handshake(ssl::stream_base::client);
-        ws.handshake(settings_.ip, samsungTarget(settings_.token));
-        if (!waitForSamsungAuthorization(ws, error)) return false;
+        auto ec = runExternalTvAsync(ioc, [&](auto done) {
+            beast::get_lowest_layer(ws).async_connect(endpoints, std::move(done));
+        });
+        if (ec) {
+            error = "Samsung WSS connect failed: " + ec.message();
+            return false;
+        }
+
+        beast::get_lowest_layer(ws).expires_after(5s);
+        ec = runExternalTvAsync(ioc, [&](auto done) {
+            ws.next_layer().async_handshake(ssl::stream_base::client, std::move(done));
+        });
+        if (ec) {
+            error = "Samsung TLS handshake failed: " + ec.message();
+            return false;
+        }
+
+        auto timeout = websocket::stream_base::timeout::suggested(beast::role_type::client);
+        timeout.handshake_timeout = 5s;
+        ws.set_option(timeout);
+        beast::get_lowest_layer(ws).expires_after(5s);
+        ec = runExternalTvAsync(ioc, [&](auto done) {
+            ws.async_handshake(settings_.ip, samsungTarget(settings_.token), std::move(done));
+        });
+        if (ec) {
+            error = "Samsung WebSocket handshake failed: " + ec.message();
+            return false;
+        }
+
+        if (!waitForSamsungAuthorization(ws, ioc, error)) return false;
         const auto payload = samsungPayload(key);
-        ws.write(asio::buffer(payload));
-        beast::error_code ec;
-        ws.close(websocket::close_code::normal, ec);
+        if (!writeSamsungPayload(ws, ioc, payload, error)) return false;
+        closeSamsungWebSocket(ws, ioc);
         error.clear();
         return true;
     } catch (const std::exception& e) {
@@ -236,14 +342,33 @@ bool SamsungTizenTransport::sendKeyPlain(SamsungRemoteKey key, std::string& erro
         asio::io_context ioc;
         tcp::resolver resolver(ioc);
         websocket::stream<beast::tcp_stream> ws(ioc);
+        const auto endpoints = resolver.resolve(settings_.ip, "8001");
+
         beast::get_lowest_layer(ws).expires_after(5s);
-        beast::get_lowest_layer(ws).connect(resolver.resolve(settings_.ip, "8001"));
-        ws.handshake(settings_.ip, samsungTarget(""));
-        if (!waitForSamsungAuthorization(ws, error)) return false;
+        auto ec = runExternalTvAsync(ioc, [&](auto done) {
+            beast::get_lowest_layer(ws).async_connect(endpoints, std::move(done));
+        });
+        if (ec) {
+            error = "Samsung WS connect failed: " + ec.message();
+            return false;
+        }
+
+        auto timeout = websocket::stream_base::timeout::suggested(beast::role_type::client);
+        timeout.handshake_timeout = 5s;
+        ws.set_option(timeout);
+        beast::get_lowest_layer(ws).expires_after(5s);
+        ec = runExternalTvAsync(ioc, [&](auto done) {
+            ws.async_handshake(settings_.ip, samsungTarget(""), std::move(done));
+        });
+        if (ec) {
+            error = "Samsung WebSocket handshake failed: " + ec.message();
+            return false;
+        }
+
+        if (!waitForSamsungAuthorization(ws, ioc, error)) return false;
         const auto payload = samsungPayload(key);
-        ws.write(asio::buffer(payload));
-        beast::error_code ec;
-        ws.close(websocket::close_code::normal, ec);
+        if (!writeSamsungPayload(ws, ioc, payload, error)) return false;
+        closeSamsungWebSocket(ws, ioc);
         error.clear();
         return true;
     } catch (const std::exception& e) {
@@ -277,9 +402,26 @@ bool VizioSmartCastTransport::request(const std::string& method, const std::stri
         ctx.set_verify_mode(ssl::verify_none);
         tcp::resolver resolver(ioc);
         beast::ssl_stream<beast::tcp_stream> stream(ioc, ctx);
-        beast::get_lowest_layer(stream).expires_after(5s);
-        beast::get_lowest_layer(stream).connect(resolver.resolve(settings_.ip, "7345"));
-        stream.handshake(ssl::stream_base::client);
+        const auto endpoints = resolver.resolve(settings_.ip, "7345");
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+
+        beast::get_lowest_layer(stream).expires_at(deadline);
+        auto ec = runExternalTvAsync(ioc, [&](auto done) {
+            beast::get_lowest_layer(stream).async_connect(endpoints, std::move(done));
+        });
+        if (ec) {
+            error = "Vizio SmartCast connect failed: " + ec.message();
+            return false;
+        }
+
+        beast::get_lowest_layer(stream).expires_at(deadline);
+        ec = runExternalTvAsync(ioc, [&](auto done) {
+            stream.async_handshake(ssl::stream_base::client, std::move(done));
+        });
+        if (ec) {
+            error = "Vizio SmartCast TLS handshake failed: " + ec.message();
+            return false;
+        }
 
         http::request<http::string_body> req;
         req.method(method == "GET" ? http::verb::get : http::verb::put);
@@ -299,10 +441,26 @@ bool VizioSmartCastTransport::request(const std::string& method, const std::stri
             req.body() = body;
             req.prepare_payload();
         }
-        http::write(stream, req);
+
+        beast::get_lowest_layer(stream).expires_at(deadline);
+        ec = runExternalTvAsync(ioc, [&](auto done) {
+            http::async_write(stream, req, std::move(done));
+        });
+        if (ec) {
+            error = "Vizio SmartCast write failed: " + ec.message();
+            return false;
+        }
+
         beast::flat_buffer buffer;
         http::response<http::string_body> res;
-        http::read(stream, buffer, res);
+        beast::get_lowest_layer(stream).expires_at(deadline);
+        ec = runExternalTvAsync(ioc, [&](auto done) {
+            http::async_read(stream, buffer, res, std::move(done));
+        });
+        if (ec) {
+            error = "Vizio SmartCast read failed: " + ec.message();
+            return false;
+        }
         response = res.body();
         if (res.result_int() < 200 || res.result_int() >= 300) {
             error = "Vizio SmartCast HTTP " + std::to_string(res.result_int());
@@ -326,17 +484,20 @@ bool VizioSmartCastTransport::request(const std::string& method, const std::stri
             return false;
         }
 
-        // This Vizio firmware acknowledges key_command before the remote-key
-        // action is durably queued. After prolonged blanking, 500 ms was too
-        // short, and a graceful TLS close_notify still caused an accepted
-        // POW_OFF to be discarded. Holding the connection for 2 s and then
-        // closing the socket without close_notify reliably transitions power.
+        // This firmware can discard an acknowledged key command if TLS is closed
+        // immediately. Preserve the proven 2-second hold, then force-close without
+        // close_notify. Other requests use a bounded asynchronous TLS shutdown.
         if (method != "GET" && target == "/key_command/") {
             std::this_thread::sleep_for(2000ms);
         } else {
-            beast::error_code ec;
-            stream.shutdown(ec);
+            beast::get_lowest_layer(stream).expires_after(1500ms);
+            runExternalTvAsync(ioc, [&](auto done) {
+                stream.async_shutdown(std::move(done));
+            });
         }
+        beast::error_code ignored;
+        beast::get_lowest_layer(stream).socket().shutdown(tcp::socket::shutdown_both, ignored);
+        beast::get_lowest_layer(stream).socket().close(ignored);
         error.clear();
         return true;
     } catch (const std::exception& e) {
