@@ -418,3 +418,71 @@ bool IpcClient2::send(const std::wstring msg)
 	return complete;
 }
 
+void IpcClient2::sendAsync(
+	std::wstring msg,
+	std::function<void(bool)> completion,
+	unsigned max_attempts,
+	unsigned retry_delay_ms,
+	unsigned retry_window_ms)
+{
+	if (!running_)
+	{
+		if (completion)
+			completion(false);
+		return;
+	}
+
+	auto state = std::make_shared<AsyncSendState>(
+		io_,
+		std::move(msg),
+		std::move(completion),
+		max_attempts,
+		retry_delay_ms,
+		retry_window_ms);
+	boost::asio::post(io_, [this, state] {
+		send_async_attempt(state);
+		});
+}
+
+void IpcClient2::send_async_attempt(std::shared_ptr<AsyncSendState> state)
+{
+	auto finish = [state](bool result) {
+		auto callback = std::move(state->completion);
+		if (callback)
+			callback(result);
+	};
+
+	if (!running_ || state->max_attempts == 0)
+	{
+		finish(false);
+		return;
+	}
+
+	++state->attempts;
+	if (send(state->message))
+	{
+		finish(true);
+		return;
+	}
+
+	if (!running_ ||
+		state->attempts >= state->max_attempts ||
+		std::chrono::steady_clock::now() >= state->deadline)
+	{
+		finish(false);
+		return;
+	}
+
+	state->timer.expires_after(std::chrono::milliseconds(state->retry_delay_ms));
+	state->timer.async_wait([this, state](const boost::system::error_code& ec) {
+		if (ec)
+		{
+			auto callback = std::move(state->completion);
+			if (callback)
+				callback(false);
+			return;
+		}
+		send_async_attempt(state);
+		});
+}
+

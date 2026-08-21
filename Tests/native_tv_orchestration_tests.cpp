@@ -5,12 +5,16 @@
 #include "../LGTV Companion Service/external_tv_transport.h"
 #include "../Common/external_tv_settings.h"
 #include "../Common/external_tv_diagnostics.h"
+#include "../Common/ipc_v2.h"
 
 #include <algorithm>
 #include <boost/asio.hpp>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <future>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -36,6 +40,77 @@ void check_eq(const T& actual, const T& expected, const std::string& message) {
 
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
+
+struct AsyncPipeTestState {
+    std::atomic<bool> received{false};
+    std::mutex mutex;
+    std::wstring payload;
+};
+
+void asyncPipeTestCallback(std::wstring message, LPVOID object) {
+    auto* state = static_cast<AsyncPipeTestState*>(object);
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->payload = std::move(message);
+    }
+    state->received = true;
+}
+
+void test_ipc_client_async_send_runs_on_owned_io_thread() {
+    const auto caller_thread = std::this_thread::get_id();
+    const std::wstring pipe_name = L"\\\\.\\pipe\\LGTVCompanionAsyncSendTest-" +
+        std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    AsyncPipeTestState server_state;
+    IpcServer2 server(pipe_name, asyncPipeTestCallback, &server_state, true);
+    IpcClient2 client(pipe_name, nullptr, nullptr, true);
+
+    auto completion = std::make_shared<std::promise<std::pair<bool, std::thread::id>>>();
+    auto future = completion->get_future();
+    client.sendAsync(L"async-send-test", [completion](bool ok) {
+        completion->set_value({ok, std::this_thread::get_id()});
+    });
+
+    check(future.wait_for(3s) == std::future_status::ready,
+          "async IPC send must complete without blocking the caller");
+    if (future.wait_for(0s) == std::future_status::ready) {
+        const auto result = future.get();
+        check(result.first, "async IPC send must report success");
+        check(result.second != caller_thread,
+              "async IPC send must execute on the client's owned IO thread");
+    }
+
+    const auto receive_deadline = Clock::now() + 3s;
+    while (!server_state.received && Clock::now() < receive_deadline)
+        std::this_thread::sleep_for(10ms);
+    check(server_state.received, "async IPC send must reach the named-pipe server");
+    if (server_state.received) {
+        std::lock_guard<std::mutex> lock(server_state.mutex);
+        check(server_state.payload == L"async-send-test", "async IPC payload must be preserved");
+    }
+    client.terminate();
+    server.terminate();
+
+    const std::wstring missing_pipe = pipe_name + L"-missing";
+    IpcClient2 unavailable_client(missing_pipe, nullptr, nullptr, true);
+    auto failure_completion = std::make_shared<std::promise<std::pair<bool, std::thread::id>>>();
+    auto failure_future = failure_completion->get_future();
+    const auto call_started = Clock::now();
+    unavailable_client.sendAsync(L"expected-failure", [failure_completion](bool ok) {
+        failure_completion->set_value({ok, std::this_thread::get_id()});
+    });
+    const auto call_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - call_started);
+    check(call_elapsed < 100ms,
+          "async IPC submission must return promptly when the service pipe is unavailable");
+    check(failure_future.wait_for(2s) == std::future_status::ready,
+          "async IPC retry window must fail closed within its bounded interval");
+    if (failure_future.wait_for(0s) == std::future_status::ready) {
+        const auto result = failure_future.get();
+        check(!result.first, "async IPC send must report failure when the pipe stays unavailable");
+        check(result.second != caller_thread,
+              "async IPC failure completion must stay on the client's owned IO thread");
+    }
+    unavailable_client.terminate();
+}
 
 void test_first_idle_arms_once() {
     IdleCoordinator idle(60min);
@@ -603,6 +678,7 @@ void test_external_tv_snapshot_and_simulation_payload_round_trip() {
 }  // namespace
 
 int main() {
+    test_ipc_client_async_send_runs_on_owned_io_thread();
     test_first_idle_arms_once();
     test_busy_cancels_deadline();
     test_extended_idle_fires_once();

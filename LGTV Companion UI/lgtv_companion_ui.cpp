@@ -1751,27 +1751,30 @@ void startExternalTvDiagnostic(HWND hWnd, ExternalTvDiagnosticRequest request)
 	SetDlgItemText(hWnd, IDC_EXTTV_STATUS, pending.c_str());
 
 	auto client = p_pipe_client;
-	std::thread([client, request]() {
-		const std::wstring command = tools::widen(request.toJson().dump());
-		int remaining_ms = 1000;
-		bool sent = client && client->send(command);
-		while (!sent && remaining_ms > 0)
-		{
-			Sleep(25);
-			remaining_ms -= 25;
-			sent = client && client->send(command);
-		}
-		if (!sent)
-		{
-			ExternalTvDiagnosticResponse response;
-			response.request_id = request.request_id;
-			response.action = request.action;
-			response.device = request.device;
-			response.operation = request.operation;
-			response.message = "Service IPC is unavailable";
-			queueExternalTvDiagnosticResponse(response);
-		}
-	}).detach();
+	if (!client)
+	{
+		ExternalTvDiagnosticResponse response;
+		response.request_id = request.request_id;
+		response.action = request.action;
+		response.device = request.device;
+		response.operation = request.operation;
+		response.message = "Service IPC is unavailable";
+		queueExternalTvDiagnosticResponse(response);
+		return;
+	}
+
+	const std::wstring command = tools::widen(request.toJson().dump());
+	client->sendAsync(command, [request](bool sent) {
+		if (sent)
+			return;
+		ExternalTvDiagnosticResponse response;
+		response.request_id = request.request_id;
+		response.action = request.action;
+		response.device = request.device;
+		response.operation = request.operation;
+		response.message = "Service IPC is unavailable";
+		queueExternalTvDiagnosticResponse(response);
+		});
 }
 
 void startExternalTvDiagnostic(HWND hWnd, ExternalTvDiagnosticDevice device,

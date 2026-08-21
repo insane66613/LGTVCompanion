@@ -6,6 +6,9 @@
 #include <atomic>
 #include <mutex>
 #include <array>
+#include <chrono>
+#include <functional>
+#include <memory>
 #include <boost/asio.hpp>
 #include <boost/asio/windows/stream_handle.hpp>
 
@@ -63,11 +66,42 @@ public:
 		bool message_mode = false);
 	~IpcClient2();
 	bool send(std::wstring msg);
+	void sendAsync(
+		std::wstring msg,
+		std::function<void(bool)> completion,
+		unsigned max_attempts = 41,
+		unsigned retry_delay_ms = 25,
+		unsigned retry_window_ms = 1000);
 	bool terminate();
 
 private:
+	struct AsyncSendState {
+		std::wstring message;
+		std::function<void(bool)> completion;
+		unsigned attempts = 0;
+		unsigned max_attempts = 0;
+		unsigned retry_delay_ms = 0;
+		std::chrono::steady_clock::time_point deadline;
+		boost::asio::steady_timer timer;
+
+		AsyncSendState(
+			boost::asio::io_context& io,
+			std::wstring value,
+			std::function<void(bool)> callback,
+			unsigned attempts_limit,
+			unsigned retry_delay,
+			unsigned retry_window)
+			: message(std::move(value)),
+			completion(std::move(callback)),
+			max_attempts(attempts_limit),
+			retry_delay_ms(retry_delay),
+			deadline(std::chrono::steady_clock::now() + std::chrono::milliseconds(retry_window)),
+			timer(io) {}
+	};
+
 	void connect_loop();
 	void start_read();
+	void send_async_attempt(std::shared_ptr<AsyncSendState> state);
 
 private:
 	boost::asio::io_context io_;
