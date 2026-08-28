@@ -16,6 +16,7 @@
 #define			TASK_FOLDER						L"\\LGTV Companion"
 #define			TASK_UPDATER_SILENT				L"LGTVC Silent Update Task"
 #define			TASK_DAEMON						L"LGTVC Run Daemon Task"
+#define			TASK_DAEMON_RECOVERY				L"LGTVC Daemon Recovery Task"
 #define			TASK_DAEMON_VISIBLE				L"LGTVC Run Daemon Visible Task"
 #define			CUSTOM_MESSAGE_RESTART			L"LGTVC_CUSTOM_MESSAGE_RESTART"
 #define			CUSTOM_MESSAGE_CLOSE			L"LGTVC_CUSTOM_MESSAGE_CLOSE"

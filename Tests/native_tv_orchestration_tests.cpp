@@ -6,12 +6,15 @@
 #include "../Common/external_tv_settings.h"
 #include "../Common/external_tv_diagnostics.h"
 #include "../Common/ipc_v2.h"
+#include "../Common/taskbar_recovery.h"
 
 #include <algorithm>
 #include <boost/asio.hpp>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <future>
 #include <iostream>
 #include <mutex>
@@ -110,6 +113,135 @@ void test_ipc_client_async_send_runs_on_owned_io_thread() {
               "async IPC failure completion must stay on the client's owned IO thread");
     }
     unavailable_client.terminate();
+}
+
+struct SyncPipeStressState {
+    std::atomic<unsigned> received_chars{0};
+};
+
+void syncPipeStressCallback(std::wstring message, LPVOID object) {
+    auto* state = static_cast<SyncPipeStressState*>(object);
+    if (std::all_of(message.begin(), message.end(), [](wchar_t ch) { return ch == L'x'; }))
+        state->received_chars.fetch_add(static_cast<unsigned>(message.size()), std::memory_order_relaxed);
+}
+
+void test_ipc_client_sync_send_does_not_poison_owned_iocp() {
+    const std::wstring pipe_name = L"\\\\.\\pipe\\LGTVCompanionSyncSendStress-" +
+        std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    SyncPipeStressState state;
+    IpcServer2 server(pipe_name, syncPipeStressCallback, &state, false);
+    IpcClient2 client(pipe_name, nullptr, nullptr, false);
+
+    constexpr unsigned target = 20000;
+    unsigned sent = 0;
+    const auto send_deadline = Clock::now() + 10s;
+    while (sent < target && Clock::now() < send_deadline) {
+        if (client.send(L"x"))
+            ++sent;
+        else
+            std::this_thread::sleep_for(1ms);
+    }
+    check(sent == target, "synchronous IPC stress must complete all writes without corrupting the owned IOCP");
+
+    const auto receive_deadline = Clock::now() + 3s;
+    while (state.received_chars.load(std::memory_order_relaxed) < sent && Clock::now() < receive_deadline)
+        std::this_thread::sleep_for(1ms);
+    check(state.received_chars.load(std::memory_order_relaxed) == sent,
+          "byte-mode IPC stress must preserve every synchronous write");
+
+    client.terminate();
+    server.terminate();
+}
+
+struct PendingSyncPipeState {
+    std::atomic<bool> client_read_seen{false};
+};
+
+void pendingSyncPipeCallback(std::wstring message, LPVOID object) {
+    auto* state = static_cast<PendingSyncPipeState*>(object);
+    if (message == L"ready")
+        state->client_read_seen.store(true, std::memory_order_release);
+}
+
+void test_ipc_client_pending_sync_send_does_not_enter_owned_iocp() {
+    const std::wstring pipe_name = L"\\\\.\\pipe\\LGTVCompanionPendingSyncSend-" +
+        std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    constexpr std::size_t payload_chars = 4 * 1024 * 1024;
+    const DWORD payload_bytes = static_cast<DWORD>(payload_chars * sizeof(wchar_t));
+    PendingSyncPipeState state;
+    std::atomic<bool> server_failed{false};
+    std::atomic<bool> begin_drain{false};
+    std::atomic<unsigned long long> received_bytes{0};
+
+    std::thread server_thread([&] {
+        HANDLE pipe = CreateNamedPipeW(pipe_name.c_str(), PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 4096, 4096, 0, nullptr);
+        if (pipe == INVALID_HANDLE_VALUE) {
+            server_failed.store(true, std::memory_order_release);
+            return;
+        }
+        BOOL connected = ConnectNamedPipe(pipe, nullptr);
+        if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
+            server_failed.store(true, std::memory_order_release);
+            CloseHandle(pipe);
+            return;
+        }
+        const wchar_t ready[] = L"ready";
+        DWORD written = 0;
+        if (!WriteFile(pipe, ready, 5 * sizeof(wchar_t), &written, nullptr) || written != 5 * sizeof(wchar_t))
+            server_failed.store(true, std::memory_order_release);
+
+        while (!begin_drain.load(std::memory_order_acquire) && !server_failed.load(std::memory_order_acquire))
+            std::this_thread::sleep_for(1ms);
+        std::this_thread::sleep_for(250ms);
+
+        std::vector<char> buffer(64 * 1024);
+        while (received_bytes.load(std::memory_order_relaxed) < payload_bytes) {
+            DWORD bytes_read = 0;
+            if (!ReadFile(pipe, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read, nullptr) || bytes_read == 0) {
+                server_failed.store(true, std::memory_order_release);
+                break;
+            }
+            received_bytes.fetch_add(bytes_read, std::memory_order_relaxed);
+        }
+        FlushFileBuffers(pipe);
+        DisconnectNamedPipe(pipe);
+        CloseHandle(pipe);
+    });
+
+    IpcClient2 client(pipe_name, pendingSyncPipeCallback, &state, false);
+    const auto association_deadline = Clock::now() + 3s;
+    while (!state.client_read_seen.load(std::memory_order_acquire) &&
+           !server_failed.load(std::memory_order_acquire) && Clock::now() < association_deadline)
+        std::this_thread::sleep_for(1ms);
+    check(state.client_read_seen.load(std::memory_order_acquire),
+          "client read callback must prove the pipe is owned by the Asio IOCP before the pending write");
+
+    std::wstring payload(payload_chars, L'p');
+    begin_drain.store(true, std::memory_order_release);
+    const bool sent = client.send(payload);
+    check(sent, "pending synchronous IPC write must complete without poisoning the owned IOCP");
+
+    server_thread.join();
+    check(!server_failed.load(std::memory_order_acquire), "pending-write test server must complete cleanly");
+    check(received_bytes.load(std::memory_order_relaxed) == payload_bytes,
+          "pending synchronous IPC write must deliver the complete payload");
+    client.terminate();
+}
+
+void test_taskbar_recovery_coalesces_and_fires_once() {
+    TaskbarRecoveryScheduler scheduler(1500ms);
+    const auto t0 = TaskbarRecoveryScheduler::Clock::time_point{};
+
+    scheduler.schedule(t0);
+    scheduler.schedule(t0 + 500ms);
+    check(scheduler.pending(), "taskbar recovery must stay armed after repeated display events");
+    check(!scheduler.consumeIfDue(t0 + 1499ms),
+          "repeated display events must push the recovery deadline out");
+    check(scheduler.consumeIfDue(t0 + 2000ms),
+          "taskbar recovery must fire after the final debounce delay");
+    check(!scheduler.consumeIfDue(t0 + 10s),
+          "taskbar recovery must be one-shot and never become periodic");
 }
 
 void test_first_idle_arms_once() {
@@ -634,6 +766,37 @@ void test_external_tv_transport_timeouts_are_bounded() {
     }
 }
 
+std::string read_binary_file(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return input ? std::string(std::istreambuf_iterator<char>(input), {}) : std::string{};
+}
+
+bool contains_utf16le_ascii(const std::string& bytes, const std::string& text) {
+    std::string needle;
+    for (const char ch : text) {
+        needle.push_back(ch);
+        needle.push_back('\0');
+    }
+    return bytes.find(needle) != std::string::npos;
+}
+
+void test_daemon_recovery_watchdog_contract() {
+    const auto root = std::filesystem::absolute(std::filesystem::path(__FILE__)).parent_path().parent_path();
+    const auto recovery_xml = read_binary_file(root / "LGTV Companion Setup" / "LGTVCdaemonRecovery.xml");
+    check(!recovery_xml.empty(), "daemon recovery watchdog task XML must be installed from source");
+    if (!recovery_xml.empty()) {
+        check(contains_utf16le_ascii(recovery_xml, "<TimeTrigger>"),
+              "daemon recovery watchdog must use a registration-independent time trigger");
+        check(contains_utf16le_ascii(recovery_xml, "<StartBoundary>2025-03-16T00:00:00</StartBoundary>"),
+              "daemon recovery watchdog must use a stable past boundary so it becomes schedulable immediately");
+        check(contains_utf16le_ascii(recovery_xml, "<Interval>PT1M</Interval>"), "daemon recovery watchdog must probe every minute");
+        check(contains_utf16le_ascii(recovery_xml, "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"), "daemon recovery watchdog must not overlap probes");
+        check(contains_utf16le_ascii(recovery_xml, "-recovery_probe"), "daemon recovery watchdog must invoke the bounded recovery probe mode");
+    }
+    const auto installer = read_binary_file(root / "LGTV Companion Setup" / "Product.wxs");
+    check(installer.find("LGTVC Daemon Recovery Task") != std::string::npos, "installer must create and manage the daemon recovery watchdog task");
+}
+
 void test_external_tv_snapshot_and_simulation_payload_round_trip() {
     ExternalTvDiagnosticResponse snapshot;
     snapshot.request_id = "req-snapshot";
@@ -679,6 +842,10 @@ void test_external_tv_snapshot_and_simulation_payload_round_trip() {
 
 int main() {
     test_ipc_client_async_send_runs_on_owned_io_thread();
+    test_ipc_client_sync_send_does_not_poison_owned_iocp();
+    test_ipc_client_pending_sync_send_does_not_enter_owned_iocp();
+    test_taskbar_recovery_coalesces_and_fires_once();
+    test_daemon_recovery_watchdog_contract();
     test_first_idle_arms_once();
     test_busy_cancels_deadline();
     test_extended_idle_fires_once();

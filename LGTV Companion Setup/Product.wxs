@@ -42,6 +42,14 @@
     <CustomAction Id="PropUpdateTaskDaemon" Property="UpdateTaskDaemon" Value="&quot;schtasks.exe&quot; /CHANGE /TN &quot;LGTV Companion\LGTVC Run Daemon Task&quot; /TR &quot;'[INSTALLFOLDER]LGTVdaemon.exe' -run_hidden&quot;"/>
     <CustomAction Id="UpdateTaskDaemon" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Return="ignore" Impersonate="no"/>
 
+    <Property Id="CreateTaskDaemonRecovery" Value=" " />
+    <CustomAction Id="PropCreateTaskDaemonRecovery" Property="CreateTaskDaemonRecovery" Value="&quot;schtasks.exe&quot; /CREATE /XML &quot;[INSTALLFOLDER]XML\LGTVCdaemonRecovery.xml&quot; /TN &quot;LGTV Companion\LGTVC Daemon Recovery Task&quot; /F"/>
+    <CustomAction Id="CreateTaskDaemonRecovery" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Return="ignore" Impersonate="no"/>
+
+    <Property Id="UpdateTaskDaemonRecovery" Value=" " />
+    <CustomAction Id="PropUpdateTaskDaemonRecovery" Property="UpdateTaskDaemonRecovery" Value="&quot;schtasks.exe&quot; /CHANGE /TN &quot;LGTV Companion\LGTVC Daemon Recovery Task&quot; /TR &quot;'[INSTALLFOLDER]LGTVdaemon.exe' -recovery_probe&quot;"/>
+    <CustomAction Id="UpdateTaskDaemonRecovery" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Return="ignore" Impersonate="no"/>
+
     <Property Id="CreateTaskDaemonShown" Value=" " />
     <CustomAction Id="PropCreateTaskDaemonShown" Property="CreateTaskDaemonShown" Value="&quot;schtasks.exe&quot; /CREATE /XML &quot;[INSTALLFOLDER]XML\LGTVCother.xml&quot; /TN &quot;LGTV Companion\LGTVC Run Daemon Visible Task&quot; /F"/>
     <CustomAction Id="CreateTaskDaemonShown" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixQuietExec" Execute="deferred" Return="check" Impersonate="no"/>
@@ -56,10 +64,12 @@
 
     <!--Custom Actions-->
     <CustomAction Id="StopTaskDaemon" Execute="immediate" Impersonate="yes" Return="ignore" ExeCommand="&quot;schtasks.exe&quot; /END /TN &quot;LGTV Companion\LGTVC Run Daemon Task&quot;" Directory="INSTALLFOLDER" />
+    <CustomAction Id="StopTaskDaemonRecovery" Execute="immediate" Impersonate="yes" Return="ignore" ExeCommand="&quot;schtasks.exe&quot; /END /TN &quot;LGTV Companion\LGTVC Daemon Recovery Task&quot;" Directory="INSTALLFOLDER" />
     <CustomAction Id="StopTaskDaemonVisible" Execute="immediate" Impersonate="yes" Return="ignore" ExeCommand="&quot;schtasks.exe&quot; /END /TN &quot;LGTV Companion\LGTVC Run Daemon Visible Task&quot;" Directory="INSTALLFOLDER" />
     <CustomAction Id="StopTaskUpdater" Execute="immediate" Impersonate="yes" Return="ignore" ExeCommand="&quot;schtasks.exe&quot; /END /TN &quot;LGTV Companion\LGTVC Silent Update Task&quot;" Directory="INSTALLFOLDER" />
 
     <CustomAction Id="DeleteTaskDaemon" Execute="deferred" Impersonate="no" Return="ignore" ExeCommand="&quot;schtasks.exe&quot; /DELETE /TN &quot;LGTV Companion\LGTVC Run Daemon Task&quot; /F" Directory="INSTALLFOLDER" />
+    <CustomAction Id="DeleteTaskDaemonRecovery" Execute="deferred" Impersonate="no" Return="ignore" ExeCommand="&quot;schtasks.exe&quot; /DELETE /TN &quot;LGTV Companion\LGTVC Daemon Recovery Task&quot; /F" Directory="INSTALLFOLDER" />
     <CustomAction Id="DeleteTaskDaemonVisible" Execute="deferred" Impersonate="no" Return="ignore" ExeCommand="&quot;schtasks.exe&quot; /DELETE /TN &quot;LGTV Companion\LGTVC Run Daemon Visible Task&quot; /F" Directory="INSTALLFOLDER" />
     <CustomAction Id="DeleteTaskUpdater" Execute="deferred" Impersonate="no" Return="ignore" ExeCommand="&quot;schtasks.exe&quot; /DELETE /TN &quot;LGTV Companion\LGTVC Silent Update Task&quot; /F" Directory="INSTALLFOLDER" />
     
@@ -85,17 +95,23 @@
       <Custom Action="CreateTaskDaemon" After="PropCreateTaskDaemon" Condition ="NOT Installed"/>
       <Custom Action="PropUpdateTaskDaemon" After="CreateTaskDaemon" Condition ="NOT Installed"/>
       <Custom Action="UpdateTaskDaemon" After="PropUpdateTaskDaemon" Condition ="NOT Installed"/>
-      <Custom Action="PropCreateTaskDaemonShown" After="UpdateTaskDaemon" Condition ="NOT Installed"/>
+      <Custom Action="PropCreateTaskDaemonRecovery" After="UpdateTaskDaemon" Condition ="NOT Installed"/>
+      <Custom Action="CreateTaskDaemonRecovery" After="PropCreateTaskDaemonRecovery" Condition ="NOT Installed"/>
+      <Custom Action="PropUpdateTaskDaemonRecovery" After="CreateTaskDaemonRecovery" Condition ="NOT Installed"/>
+      <Custom Action="UpdateTaskDaemonRecovery" After="PropUpdateTaskDaemonRecovery" Condition ="NOT Installed"/>
+      <Custom Action="PropCreateTaskDaemonShown" After="UpdateTaskDaemonRecovery" Condition ="NOT Installed"/>
       <Custom Action="CreateTaskDaemonShown" After="PropCreateTaskDaemonShown" Condition ="NOT Installed"/>
       <Custom Action="PropUpdateTaskDaemonShown" After="CreateTaskDaemonShown" Condition ="NOT Installed"/>
       <Custom Action="UpdateTaskDaemonShown" After="PropUpdateTaskDaemonShown" Condition ="NOT Installed"/>
       <Custom Action="PropRunDaemonTask" After="InstallService" Condition="NOT Installed" />
       <Custom Action="RunDaemonTask" After="PropRunDaemonTask" Condition="NOT Installed" />
       <Custom Action="StopTaskDaemon" Before="InstallValidate" Condition="Installed AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="StopTaskDaemonRecovery" Before="InstallValidate" Condition="Installed AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="StopTaskDaemonVisible" Before="InstallValidate" Condition="Installed AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="StopTaskUpdater" Before="InstallValidate" Condition="Installed AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="DeleteTaskDaemon" After="InstallInitialize" Condition='REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE' />
-      <Custom Action="DeleteTaskDaemonVisible" After="InstallInitialize" Condition='REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE' />
+      <Custom Action="DeleteTaskDaemonRecovery" After="DeleteTaskDaemon" Condition='REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE' />
+      <Custom Action="DeleteTaskDaemonVisible" After="DeleteTaskDaemonRecovery" Condition='REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE' />
       <Custom Action="DeleteTaskUpdater" After="InstallInitialize" Condition='REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE' />
       <Custom Action="LaunchUpdaterFirstRun" After="InstallFinalize" Condition="NOT Installed" />
     </InstallExecuteSequence>
@@ -109,6 +125,7 @@
       <ComponentRef Id="LGTVcli" />
       <ComponentRef Id="LGTVupdater" />
       <ComponentRef Id="DaemonTaskXmlComponent"/>
+      <ComponentRef Id="DaemonRecoveryTaskXmlComponent"/>
       <ComponentRef Id="OtherTaskXmlComponent"/>
       <ComponentRef Id="ApplicationShortcut" />
       <!--<ComponentRef Id='RemoveOrphanFiles' />-->
@@ -160,6 +177,9 @@
         <Directory Id="XMLDIR" Name="XML">
           <Component Id="DaemonTaskXmlComponent" Guid="{980752EF-BDC7-475E-87DB-75604B74F904}" Bitness="always64" >
             <File Id="DaemonTaskXmlFile" Source="$(var.ProjectDir)LGTVCdaemon.xml" KeyPath="yes"/>
+          </Component>
+          <Component Id="DaemonRecoveryTaskXmlComponent" Guid="{99CB125E-E540-42D9-8606-E3EB6C4CB453}" Bitness="always64" >
+            <File Id="DaemonRecoveryTaskXmlFile" Source="$(var.ProjectDir)LGTVCdaemonRecovery.xml" KeyPath="yes"/>
           </Component>
           <Component Id="OtherTaskXmlComponent" Guid="{E93BC632-32F4-4B56-9DEF-BEA47F3C5B6D}" Bitness="always64" >
             <File Id="OtherTaskXmlFile" Source="$(var.ProjectDir)LGTVCother.xml" KeyPath="yes"/>

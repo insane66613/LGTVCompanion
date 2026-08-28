@@ -391,7 +391,9 @@ bool IpcClient2::send(const std::wstring msg)
 	if (!event)
 		return false;
 	OVERLAPPED overlapped{};
-	overlapped.hEvent = event;
+	// This handle is also owned by Boost.Asio's IOCP. Keep the manual WriteFile
+	// completion out of Asio's completion queue; Asio did not allocate this OVERLAPPED.
+	overlapped.hEvent = reinterpret_cast<HANDLE>(reinterpret_cast<ULONG_PTR>(event) | 1);
 	DWORD written = 0;
 	BOOL ok = WriteFile(
 		raw_,
