@@ -1,8 +1,9 @@
-﻿<!-- When publishing updated version, make sure to update "ProductCode" GUID and "Version" -->
+﻿<!-- Downstream release v5.7.0.1. Windows Installer compares only major.minor.build,
+     so MSI ProductVersion 5.7.1 represents downstream revision 1 of upstream v5.7.0. -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui" >
-  <Package Name="LGTV Companion" Language="1033" 
-           Version="5.7.0" Manufacturer="J Persson" UpgradeCode="0BA17E5B-11CE-491D-B1A1-05DD2D9F610A" InstallerVersion="500" 
-           ProductCode="{30E34C39-D56E-421E-A99E-F044E461AAE1}">
+  <Package Name="LGTV Companion" Language="1033"
+           Version="5.7.1" Manufacturer="J Persson" UpgradeCode="0BA17E5B-11CE-491D-B1A1-05DD2D9F610A" InstallerVersion="500"
+           ProductCode="{ACBF912D-1B85-49C0-BE54-95E0CC6EF189}">
     <SummaryInformation Description="LGTV Companion installer" />
     <Media Id="1" Cabinet="LGTVapp.cab" EmbedCab="yes" />   
     <MajorUpgrade DowngradeErrorMessage="A newer version of LGTV Companion is already installed." />
