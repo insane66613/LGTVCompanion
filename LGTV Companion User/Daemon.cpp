@@ -18,6 +18,7 @@
 #include "daemon.h"
 #include "../Common/common_app_define.h"
 #include "../Common/ipc_v2.h"
+#include "../Common/taskbar_recovery.h"
 #include "../Common/preferences.h"
 #include "../Common/tools.h"
 #include <stdlib.h>
@@ -57,6 +58,7 @@
 #define         TIMER_CHECK_PROCESSES					21
 #define         TIMER_TOPOLOGY_COLLECTION				22
 #define         TIMER_VERSIONCHECK						23
+#define         TIMER_TASKBAR_RECOVERY					24
 #define         TIMER_MAIN_DELAY_WHEN_BUSY				1000
 #define         TIMER_MAIN_DELAY_WHEN_IDLE				50
 #define         TIMER_REMOTE_DELAY						10000
@@ -64,6 +66,7 @@
 #define         TIMER_VERSIONCHECK_DELAY				30000
 #define         TIMER_CHECK_PROCESSES_DELAY				5000
 #define         TIMER_TOPOLOGY_COLLECTION_DELAY			3000
+#define         TIMER_TASKBAR_RECOVERY_DELAY				1500
 #define			COPYDATA_MUTEX_WAIT						10
 #define         APP_DISPLAYCHANGE						WM_USER+10
 #define         APP_SET_MESSAGEFILTER					WM_USER+11
@@ -150,6 +153,7 @@ UINT							custom_daemon_close_message;
 UINT							custom_daemon_idle_message;
 UINT							custom_daemon_unidle_message;
 UINT							custom_updater_close_message;
+UINT							custom_taskbar_created_message;
 UINT							manual_user_idle_mode = 0;
 HBRUSH                          h_backbrush;
 time_t							time_of_last_topology_change = 0;
@@ -162,6 +166,7 @@ DWORD							time_of_last_controller_tick = 0;
 int								number_of_mouse_checks = 0;
 bool							last_input_was_ignored = false;
 inline static std::mutex		copydata_mutex_;
+TaskbarRecoveryScheduler		taskbar_recovery(std::chrono::milliseconds(TIMER_TASKBAR_RECOVERY_DELAY));
 
 std::shared_ptr<IpcClient2>		p_pipe_client;
 Preferences						Prefs(CONFIG_FILE);
@@ -169,6 +174,36 @@ std::string						session_id;
 std::unordered_map<std::wstring, ControllerInfo> g_device_cache; // Key = device path
 
 static bool RawInput_ValveVendorReportIsActivity(ControllerInfo& cache, const RAWHID& hid);
+
+static bool hasOtherDaemonInCurrentSession(bool& inspection_ok)
+{
+	inspection_ok = false;
+	const DWORD current_pid = GetCurrentProcessId();
+	DWORD current_session = 0;
+	if (!ProcessIdToSessionId(current_pid, &current_session))
+		return false;
+
+	PROCESSENTRY32 entry = {};
+	entry.dwSize = sizeof(PROCESSENTRY32);
+	const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snapshot == INVALID_HANDLE_VALUE)
+		return false;
+
+	bool peer_found = false;
+	if (Process32First(snapshot, &entry)) {
+		do {
+			DWORD process_session = 0;
+			if (entry.th32ProcessID != current_pid && _wcsicmp(entry.szExeFile, L"LGTVdaemon.exe") == 0 &&
+				ProcessIdToSessionId(entry.th32ProcessID, &process_session) && process_session == current_session) {
+				peer_found = true;
+				break;
+			}
+		} while (Process32Next(snapshot, &entry));
+		inspection_ok = true;
+	}
+	CloseHandle(snapshot);
+	return peer_found;
+}
 
 //Application entry point
 int APIENTRY wWinMain(_In_ HINSTANCE Instance,
@@ -195,6 +230,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance,
 			daemon_is_visible = false;
 		else if (CommandLineParameters == L"-run_visible") // launched from task scheduler as visible
 			daemon_is_visible = true;
+		else if (CommandLineParameters == L"-recovery_probe") // bounded watchdog probe; never enters normal daemon lifecycle
+		{
+			bool inspection_ok = false;
+			if (hasOtherDaemonInCurrentSession(inspection_ok))
+				return 0;
+			if (!inspection_ok)
+				return 2;
+			return tools::startScheduledTask(TASK_FOLDER, TASK_DAEMON) ? 0 : 1;
+		}
 		else if (CommandLineParameters == L"-restart") // launched from UI when applying configuration
 		{
 			if (!tools::startScheduledTask(TASK_FOLDER, TASK_DAEMON))
@@ -226,6 +270,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE Instance,
 	custom_daemon_idle_message = RegisterWindowMessage(CUSTOM_MESSAGE_IDLE);
 	custom_daemon_unidle_message = RegisterWindowMessage(CUSTOM_MESSAGE_UNIDLE);
 	custom_updater_close_message = RegisterWindowMessage(CUSTOM_MESSAGE_UPD_CLOSE);
+	custom_taskbar_created_message = RegisterWindowMessage(L"TaskbarCreated");
 
 	// if the app is already running as another process, tell the other process(es) to exit
 	closeExistingProcess();
@@ -734,6 +779,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 			KillTimer(hWnd, (UINT_PTR)TIMER_TOPOLOGY_COLLECTION);
 			PostMessage(hWnd, APP_DISPLAYCHANGE, NULL, NULL);
 		}break;
+		case TIMER_TASKBAR_RECOVERY:
+		{
+			KillTimer(hWnd, (UINT_PTR)TIMER_TASKBAR_RECOVERY);
+			if (taskbar_recovery.consumeIfDue(TaskbarRecoveryScheduler::Clock::now()) && custom_taskbar_created_message)
+			{
+				PostMessage(HWND_BROADCAST, custom_taskbar_created_message, 0, 0);
+				log(L"Broadcasting TaskbarCreated after display topology recovery.");
+			}
+		}break;
 		case TIMER_VERSIONCHECK:
 		{		
 			TCHAR buffer[MAX_PATH] = { 0 };
@@ -854,6 +908,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 							SetTimer(hWnd, TIMER_IDLE, Prefs.user_idle_mode_delay_ * 60 * 1000, (TIMERPROC)NULL);
 						}
 						RawInput_ClearCache();
+						taskbar_recovery.schedule(TaskbarRecoveryScheduler::Clock::now());
+						SetTimer(hWnd, TIMER_TASKBAR_RECOVERY, TIMER_TASKBAR_RECOVERY_DELAY, (TIMERPROC)NULL);
 						log(L"System requests displays ON.");
 					}
 					return true;
@@ -868,6 +924,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	{
 		time_of_last_topology_change = time(0);
 		checkDisplayTopology();
+		taskbar_recovery.schedule(TaskbarRecoveryScheduler::Clock::now());
+		SetTimer(hWnd, TIMER_TASKBAR_RECOVERY, TIMER_TASKBAR_RECOVERY_DELAY, (TIMERPROC)NULL);
 	}break;
 	case WM_DISPLAYCHANGE:
 	{

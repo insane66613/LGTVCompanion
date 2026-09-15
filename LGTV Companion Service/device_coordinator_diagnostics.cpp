@@ -222,6 +222,7 @@ ExternalTvDiagnosticResponse DeviceCoordinator::runSamsungDiagnostic(
     }
 
     if (request.operation == ExternalTvDiagnosticOperation::Blank) {
+        samsung_restore_verify_timer_.cancel();
         if (state == SamsungPowerState::PictureOff) {
             response.executed = response.verified = true;
             response.message = "Samsung is already picture-off";
@@ -250,7 +251,8 @@ ExternalTvDiagnosticResponse DeviceCoordinator::runSamsungDiagnostic(
     if (request.operation == ExternalTvDiagnosticOperation::Unblank) {
         if (state == SamsungPowerState::On) {
             response.executed = response.verified = true;
-            response.message = "Samsung is already unblanked";
+            response.message = "Samsung is already unblanked; persistence watchdog armed";
+            scheduleSamsungRestoreVerification();
             return response;
         }
         if (state != SamsungPowerState::PictureOff) {
@@ -265,8 +267,9 @@ ExternalTvDiagnosticResponse DeviceCoordinator::runSamsungDiagnostic(
             return response;
         }
         response.verified = verify([](SamsungPowerState s) { return s == SamsungPowerState::On; }, 8, 500ms);
-        response.message = response.verified ? "Samsung Restore Screen verified" :
+        response.message = response.verified ? "Samsung Restore Screen verified; persistence watchdog armed" :
             "Samsung Restore Screen executed but ON state was not verified";
+        if (response.verified) scheduleSamsungRestoreVerification();
         return response;
     }
 
@@ -296,6 +299,7 @@ ExternalTvDiagnosticResponse DeviceCoordinator::runSamsungDiagnostic(
     }
 
     if (request.operation == ExternalTvDiagnosticOperation::PowerOff) {
+        samsung_restore_verify_timer_.cancel();
         if (state == SamsungPowerState::Standby) {
             response.executed = response.verified = true;
             response.message = "Samsung is already in standby";

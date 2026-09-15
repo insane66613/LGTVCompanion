@@ -108,6 +108,55 @@ bool DeviceCoordinator::executeSamsungSteps(const std::vector<SamsungCommandStep
     return true;
 }
 
+void DeviceCoordinator::scheduleSamsungRestoreVerification() {
+    samsung_restore_verify_timer_.cancel();
+    samsung_restore_verify_timer_.expires_after(60s);
+    samsung_restore_verify_timer_.async_wait([this](const boost::system::error_code& ec) {
+        if (ec || stopped_) return;
+
+        std::string verify_error;
+        auto verify_state = samsung_transport_->queryPowerState(verify_error);
+        samsung_observed_state_.store(verify_state);
+        if (verify_state != SamsungPowerState::Unknown)
+            samsung_controller_.observePowerState(verify_state);
+
+        if (verify_state == SamsungPowerState::Unknown) {
+            logFailure("Samsung", "restore verification state probe", verify_error);
+            scheduleSamsungRestoreVerification();
+            return;
+        }
+
+        if (verify_state == SamsungPowerState::PictureOff) {
+            if (log_) log_->warning("ExternalTV", "Samsung remained PictureOff 60 seconds after restore; issuing one bounded recovery retry");
+            samsung_controller_.assumeAccessibilityState(SamsungAccessibilityState::Unknown);
+            const auto retry_plan = samsung_controller_.planDisableScreenOff();
+            if (!executeSamsungSteps(retry_plan)) {
+                samsung_controller_.assumeAccessibilityState(SamsungAccessibilityState::Unknown);
+                scheduleSamsungRestoreVerification();
+                return;
+            }
+
+            std::this_thread::sleep_for(2500ms);
+            verify_error.clear();
+            verify_state = samsung_transport_->queryPowerState(verify_error);
+            samsung_observed_state_.store(verify_state);
+            if (verify_state != SamsungPowerState::Unknown)
+                samsung_controller_.observePowerState(verify_state);
+
+            if (verify_state == SamsungPowerState::PictureOff)
+                logFailure("Samsung", "restore verification retry", "TV still reports PictureOff after bounded recovery");
+            else if (verify_state == SamsungPowerState::Unknown)
+                logFailure("Samsung", "restore verification retry state probe", verify_error);
+            else if (log_)
+                log_->debug("ExternalTV", "Samsung bounded recovery restored the picture; persistence monitoring continues");
+        } else if (log_) {
+            log_->debug("ExternalTV", "Samsung restore persistence check passed; monitoring remains armed");
+        }
+
+        if (!stopped_) scheduleSamsungRestoreVerification();
+    });
+}
+
 void DeviceCoordinator::executeSamsungActions(std::vector<DeviceAction> actions) {
     for (const auto action : actions) {
         if (log_) log_->debug("ExternalTV", "Samsung action start: " + std::to_string(static_cast<int>(action)));
@@ -121,6 +170,7 @@ void DeviceCoordinator::executeSamsungActions(std::vector<DeviceAction> actions)
 
         switch (action) {
         case DeviceAction::SamsungEnableScreenOff: {
+            samsung_restore_verify_timer_.cancel();
             if (state == SamsungPowerState::Unknown) {
                 logFailure("Samsung", "state probe before screen off", error);
                 break;
@@ -136,8 +186,12 @@ void DeviceCoordinator::executeSamsungActions(std::vector<DeviceAction> actions)
                 break;
             }
             const auto plan = samsung_controller_.planDisableScreenOff();
-            if (!executeSamsungSteps(plan))
+            if (!executeSamsungSteps(plan)) {
                 samsung_controller_.assumeAccessibilityState(SamsungAccessibilityState::Unknown);
+                break;
+            }
+
+            scheduleSamsungRestoreVerification();
             break;
         }
         case DeviceAction::SamsungPowerOn: {
@@ -158,6 +212,7 @@ void DeviceCoordinator::executeSamsungActions(std::vector<DeviceAction> actions)
             break;
         }
         case DeviceAction::SamsungPowerOff: {
+            samsung_restore_verify_timer_.cancel();
             if (state == SamsungPowerState::Unknown) {
                 logFailure("Samsung", "state probe before power off; KEY_POWER suppressed", error);
                 break;
@@ -264,6 +319,9 @@ void DeviceCoordinator::shutdown() {
     boost::asio::post(control_ioc_, [this]() {
         deadline_timer_.cancel();
         control_work_.reset();
+    });
+    boost::asio::post(samsung_strand_, [this]() {
+        samsung_restore_verify_timer_.cancel();
     });
 
     // Do not stop the io_context: queued lifecycle work must finish before the
