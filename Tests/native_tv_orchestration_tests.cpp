@@ -797,6 +797,32 @@ void test_daemon_recovery_watchdog_contract() {
     check(installer.find("LGTVC Daemon Recovery Task") != std::string::npos, "installer must create and manage the daemon recovery watchdog task");
 }
 
+void test_samsung_restore_verification_watchdog_contract() {
+    const auto root = std::filesystem::absolute(std::filesystem::path(__FILE__)).parent_path().parent_path();
+    const auto coordinator_h = read_binary_file(root / "LGTV Companion Service" / "device_coordinator.h");
+    const auto coordinator_cpp = read_binary_file(root / "LGTV Companion Service" / "device_coordinator.cpp");
+    const auto coordinator_diagnostics = read_binary_file(root / "LGTV Companion Service" / "device_coordinator_diagnostics.cpp");
+
+    check(coordinator_h.find("samsung_restore_verify_timer_") != std::string::npos,
+          "Samsung restore watchdog must own a dedicated timer");
+    check(coordinator_cpp.find("samsung_restore_verify_timer_.expires_after(60s)") != std::string::npos,
+          "Samsung restore watchdog must verify persistence after 60 seconds");
+    check(coordinator_cpp.find("Samsung remained PictureOff 60 seconds after restore; issuing one bounded recovery retry") != std::string::npos,
+          "Samsung restore watchdog must retry only after verified persistent PictureOff");
+    check(coordinator_cpp.find("TV still reports PictureOff after bounded recovery") != std::string::npos,
+          "Samsung restore watchdog must fail closed when bounded recovery does not restore the picture");
+    check(coordinator_cpp.find("restore verification state probe") != std::string::npos,
+          "Samsung restore watchdog must report an indeterminate 60-second state probe instead of treating Unknown as success");
+    check(coordinator_cpp.find("void DeviceCoordinator::scheduleSamsungRestoreVerification()") != std::string::npos,
+          "Samsung restore persistence verification must be a re-armable active-state watchdog");
+    check(coordinator_cpp.find("scheduleSamsungRestoreVerification();") != std::string::npos,
+          "Samsung restore watchdog must re-arm after each verification cycle while active");
+    check(coordinator_diagnostics.find("scheduleSamsungRestoreVerification();") != std::string::npos,
+          "Manual Samsung restore diagnostics must arm the same persistence watchdog");
+    check(coordinator_diagnostics.find("samsung_restore_verify_timer_.cancel();") != std::string::npos,
+          "Manual Samsung blank or power-off diagnostics must cancel stale restore monitoring");
+}
+
 void test_external_tv_snapshot_and_simulation_payload_round_trip() {
     ExternalTvDiagnosticResponse snapshot;
     snapshot.request_id = "req-snapshot";
@@ -846,6 +872,7 @@ int main() {
     test_ipc_client_pending_sync_send_does_not_enter_owned_iocp();
     test_taskbar_recovery_coalesces_and_fires_once();
     test_daemon_recovery_watchdog_contract();
+    test_samsung_restore_verification_watchdog_contract();
     test_first_idle_arms_once();
     test_busy_cancels_deadline();
     test_extended_idle_fires_once();

@@ -35,6 +35,7 @@ private:
     void executeSamsungActions(std::vector<DeviceAction> actions);
     void executeVizioActions(std::vector<DeviceAction> actions);
     bool executeSamsungSteps(const std::vector<SamsungCommandStep>& steps);
+    void scheduleSamsungRestoreVerification();
     void logFailure(const char* device, const char* action, const std::string& error);
 
     ExternalTvSettings settings_;
@@ -46,6 +47,7 @@ private:
     boost::asio::thread_pool network_pool_{2};
     boost::asio::strand<boost::asio::thread_pool::executor_type> samsung_strand_{network_pool_.get_executor()};
     boost::asio::strand<boost::asio::thread_pool::executor_type> vizio_strand_{network_pool_.get_executor()};
+    boost::asio::steady_timer samsung_restore_verify_timer_{samsung_strand_};
     std::thread control_thread_;
     std::atomic<bool> stopped_{false};
     std::atomic<SamsungPowerState> samsung_observed_state_{SamsungPowerState::Unknown};
