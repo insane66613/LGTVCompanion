@@ -94,6 +94,7 @@ class WebOsClient::Impl : public std::enable_shared_from_this<WebOsClient::Impl>
 private:
 	Device device_settings_;
 	Work work_;
+	tcp::resolver resolver_;
 	ButtonClient button_client_;
 	net::steady_timer keep_alive_timer_;
 	net::steady_timer async_timer_;
@@ -102,7 +103,6 @@ private:
 	net::steady_timer delayed_close_timer_;
 	ssl::context* ctx_;
 	udp::socket udp_socket_;
-	tcp::resolver resolver_;
 	std::optional<beast::websocket::stream<beast::tcp_stream>> ws_tcp_;
 	std::optional<beast::websocket::stream<beast::ssl_stream<beast::tcp_stream>>> ws_;
 	beast::flat_buffer buffer_;
@@ -150,13 +150,13 @@ public:
 };
 WebOsClient::Impl::Impl(net::io_context& ioc, ssl::context& ctx, Device& settings, Logging& log)
 	: resolver_(net::make_strand(ioc))
-	, async_timer_(net::make_strand(ioc))
-	, wol_timer_(net::make_strand(ioc))
-	, keep_alive_timer_(net::make_strand(ioc))
-	, delayed_request_timer_(net::make_strand(ioc))
-	, delayed_close_timer_(net::make_strand(ioc))
-	, udp_socket_(net::make_strand(ioc))
 	, button_client_(ioc, ctx, settings, log)
+	, keep_alive_timer_(resolver_.get_executor())
+	, async_timer_(resolver_.get_executor())
+	, wol_timer_(resolver_.get_executor())
+	, delayed_request_timer_(resolver_.get_executor())
+	, delayed_close_timer_(resolver_.get_executor())
+	, udp_socket_(resolver_.get_executor())
 {
 	ctx_ = &ctx;
 	device_settings_ = settings;
@@ -186,6 +186,9 @@ void WebOsClient::Impl::enqueueWork(Work& work)
 	work.timestamp_enqueue_ = time(0);
 	net::dispatch(resolver_.get_executor(), [unit = work, self = shared_from_this()]() mutable
 		{
+			// Any newly admitted work supersedes a pending idle close.
+			self->delayed_close_timer_.cancel();
+
 			//optimisations
 			if (unit.type_ == WORK_POWER_ON ) //&& !unit.forced_)
 			{
@@ -417,11 +420,17 @@ void WebOsClient::Impl::doDelayedClose(void) {
 }
 
 void WebOsClient::Impl::onDelayedClose(beast::error_code ec) {
-	if (ec )
+	if (ec)
 	{
-		if (ec = boost::asio::error::operation_aborted)
+		if (ec == boost::asio::error::operation_aborted)
 			return;
 		return onError(ec, "onDelayedClose");
+	}
+
+	if (work_.type_ != WORK_UNDEFINED || !workQueue_.empty())
+	{
+		DEBUG("Skipping delayed close because new work is pending");
+		return;
 	}
 
 	if (time(0) - timestamp_last_work_performed_ < 2)
@@ -560,16 +569,10 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 	if (ec)
 		return onError(ec, "onRead");
 	socket_status_ = SOCKET_CONNECTED;
-	if(work_.type_ != WORK_KEEPALIVE || LOG_KEEPALIVE)
-	{
-		if (device_settings_.ssl)
-			DEBUG("< < < RECV < < <: %1%", beast::buffers_to_string(buffer_.data()));
-		else
-			DEBUG("< < < RECV (non-ssl) < < <: %1%", beast::buffers_to_string(buffer_.data()));
-	}
+	const std::string raw_response = beast::buffers_to_string(buffer_.data());
 	try
 	{
-		response = json::parse(static_cast<const char*>(buffer_.data().data()), static_cast<const char*>(buffer_.data().data()) + buffer_.size());
+		response = json::parse(raw_response);
 		payload = response["payload"];
 		if (!response["id"].empty())
 			if(response["id"].is_number())
@@ -587,10 +590,23 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 	{
 		buffer_.consume(buffer_.size());
 		ERR("Aborting work unit due to invalid JSON received: %1%", e.what());
-		ERR("Invalid data received: %1%", beast::buffers_to_string(buffer_.data()));
+		ERR("Invalid response payload suppressed from logs (%1% byte(s))", std::to_string(raw_response.size()));
 		workIsFinished();
 		read();
 		return;
+	}
+	if(work_.type_ != WORK_KEEPALIVE || LOG_KEEPALIVE)
+	{
+		auto log_response = response;
+		if (log_response.contains("payload") && log_response["payload"].is_object() &&
+			log_response["payload"].contains("client-key"))
+		{
+			log_response["payload"]["client-key"] = "<redacted>";
+		}
+		if (device_settings_.ssl)
+			DEBUG("< < < RECV < < <: %1%", log_response.dump());
+		else
+			DEBUG("< < < RECV (non-ssl) < < <: %1%", log_response.dump());
 	}
 	buffer_.consume(buffer_.size());
 	if(response_id == "register_0") // WebOS Handshake
@@ -600,7 +616,7 @@ void WebOsClient::Impl::onRead(beast::error_code ec, std::size_t bytes_transferr
 			if (device_settings_.session_key == "" && !payload["client-key"].empty() && payload["client-key"].is_string()) // Received a new pairing key
 			{
 				device_settings_.session_key = payload["client-key"];
-				INFO("Pairing key received: %1%", device_settings_.session_key);
+				INFO("Pairing key received and stored");
 				webos_handshake_ = tools::narrow(LG_HANDSHAKE_PAIRED_V3);
 				tools::replaceAllInPlace(webos_handshake_, "#CLIENTKEY#", device_settings_.session_key);
 				setSessionKey(device_settings_.session_key, device_settings_.id); // Save session key to config file
@@ -1013,7 +1029,8 @@ void WebOsClient::Impl::onError(beast::error_code& ec, std::string err) {
 			}
 			else
 			{
-				WARNING("Finished retrying connection");
+				WARNING("Wake/connect attempts exhausted after %1% second(s); WOL send success does not confirm device wake",
+					std::to_string(device_settings_.extra.timeout));
 				socket_status_ = SOCKET_DISCONNECTED;
 				workIsFinished();
 			}
@@ -1028,7 +1045,8 @@ void WebOsClient::Impl::onError(beast::error_code& ec, std::string err) {
 			}
 			else
 			{
-				WARNING("Finished retrying connection");
+				WARNING("Wake/connect attempts exhausted after %1% second(s); WOL send success does not confirm device wake",
+					std::to_string(device_settings_.extra.timeout));
 				socket_status_ = SOCKET_DISCONNECTED;
 				workIsFinished();
 			}
@@ -1102,6 +1120,11 @@ void WebOsClient::Impl::onWOL(beast::error_code ec) {
 	boost::system::error_code error;
 	if (ec)
 	{
+		if (ec == boost::asio::error::operation_aborted)
+		{
+			DEBUG("WOL timer cancelled");
+			return;
+		}
 		ERR("Function call onWOL failed (%1%), Closing UDP socket!", ec.message());
 		if (udp_socket_.is_open())
 			udp_socket_.close();
@@ -1202,7 +1225,7 @@ void WebOsClient::Impl::onWOL(beast::error_code ec) {
 									logmsg += ip;
 									while (logmsg.size() < 36)
 										logmsg += " ";
-									logmsg += " - OK";
+									logmsg += " - SENT";
 								}
 								else
 								{
@@ -1210,7 +1233,7 @@ void WebOsClient::Impl::onWOL(beast::error_code ec) {
 									logmsg += ip;
 									while (logmsg.size() < 36)
 										logmsg += " ";
-									logmsg += " - FAIL";
+									logmsg += " - SEND FAIL";
 								}
 							}
 						}

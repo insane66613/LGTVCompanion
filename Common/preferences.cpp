@@ -144,6 +144,11 @@ Preferences::Preferences(std::wstring configuration_file_name)
 						auto redacted = ExternalTvSettings::fromJson(logPrefs[JSON_PREFS_NODE][JSON_EXTERNAL_TV]).toRedactedJson();
 						logPrefs[JSON_PREFS_NODE][JSON_EXTERNAL_TV] = redacted;
 					}
+					for (auto& item : logPrefs.items())
+					{
+						if (item.value().is_object() && item.value().contains(JSON_DEVICE_SESSIONKEY))
+							item.value()[JSON_DEVICE_SESSIONKEY] = "<redacted>";
+					}
 					json_string_ = logPrefs.dump(4);
 					version_loaded_ = j.get<int>();
 					if (version_loaded_ < 3)
