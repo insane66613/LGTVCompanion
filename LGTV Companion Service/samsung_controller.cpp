@@ -4,6 +4,13 @@
 
 using namespace std::chrono_literals;
 
+namespace {
+constexpr auto kPictureWakeSettle = 1800ms;
+constexpr auto kAccessibilityOpenSettle = 2200ms;
+constexpr auto kAccessibilityToggleSettle = 1000ms;
+constexpr auto kAccessibilityCloseSettle = 700ms;
+}
+
 void SamsungController::observePowerState(SamsungPowerState state) noexcept {
     // Picture Off proves the persistent mode is active, but the Accessibility
     // overlay itself is no longer trustworthy. Hardware verification on the
@@ -52,8 +59,8 @@ std::vector<SamsungCommandStep> SamsungController::planEnableScreenOff() {
     }
     accessibility_state_ = SamsungAccessibilityState::OpenEnabled;
     return {
-        {SamsungRemoteKey::Accessibility, 1400ms},
-        {SamsungRemoteKey::Enter, 0ms},
+        {SamsungRemoteKey::Accessibility, kAccessibilityOpenSettle},
+        {SamsungRemoteKey::Enter, kAccessibilityToggleSettle},
     };
 }
 
@@ -73,16 +80,16 @@ std::vector<SamsungCommandStep> SamsungController::planDisableScreenOff() {
     std::vector<SamsungCommandStep> result;
     const bool picture_off = power_state_ == SamsungPowerState::PictureOff;
     if (picture_off) {
-        result.push_back({SamsungRemoteKey::Enter, 1200ms});
+        result.push_back({SamsungRemoteKey::Enter, kPictureWakeSettle});
         power_state_ = SamsungPowerState::On;
     }
 
     if (accessibility_state_ != SamsungAccessibilityState::OpenEnabled) {
-        result.push_back({SamsungRemoteKey::Accessibility, 1400ms});
+        result.push_back({SamsungRemoteKey::Accessibility, kAccessibilityOpenSettle});
     }
 
-    result.push_back({SamsungRemoteKey::Enter, 350ms});
-    result.push_back({SamsungRemoteKey::Return, 0ms});
+    result.push_back({SamsungRemoteKey::Enter, kAccessibilityToggleSettle});
+    result.push_back({SamsungRemoteKey::Return, kAccessibilityCloseSettle});
     accessibility_state_ = SamsungAccessibilityState::ClosedDisabled;
     return result;
 }

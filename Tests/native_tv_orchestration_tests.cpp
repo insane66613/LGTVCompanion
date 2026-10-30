@@ -308,7 +308,8 @@ void test_samsung_enable_leaves_accessibility_open() {
     const auto plan = controller.planEnableScreenOff();
     check_keys(plan, {SamsungRemoteKey::Accessibility, SamsungRemoteKey::Enter},
                "enable must be AD then ENTER only");
-    check(plan.size() == 2 && plan[0].delay_after == 1400ms, "enable must wait 1400ms after AD");
+    check(plan.size() == 2 && plan[0].delay_after == 2200ms, "enable must wait 2200ms after AD");
+    check(plan[1].delay_after == 1000ms, "enable toggle must settle for 1000ms");
     check(controller.accessibilityState() == SamsungAccessibilityState::OpenEnabled,
           "successful enable plan must track menu open/enabled");
 }
@@ -320,6 +321,8 @@ void test_samsung_restore_open_awake_menu() {
     const auto plan = controller.planDisableScreenOff();
     check_keys(plan, {SamsungRemoteKey::Enter, SamsungRemoteKey::Return},
                "awake known-open restore must ENTER then RETURN");
+    check(plan[0].delay_after == 1000ms, "awake restore toggle must settle for 1000ms");
+    check(plan[1].delay_after == 700ms, "awake restore must allow 700ms for Accessibility to close");
 }
 
 void test_samsung_restore_pictureoff_invalidates_menu_and_reopens() {
@@ -333,9 +336,10 @@ void test_samsung_restore_pictureoff_invalidates_menu_and_reopens() {
     check_keys(plan, {SamsungRemoteKey::Enter, SamsungRemoteKey::Accessibility,
                       SamsungRemoteKey::Enter, SamsungRemoteKey::Return},
                "pictureoff restore must wake, reopen Accessibility, disable first item, then close");
-    check(plan[0].delay_after == 1200ms, "pictureoff wake must wait 1200ms");
-    check(plan[1].delay_after == 1400ms, "pictureoff restore must wait after reopening Accessibility");
-    check(plan[2].delay_after == 350ms, "disable toggle must wait 350ms before closing Accessibility");
+    check(plan[0].delay_after == 1800ms, "pictureoff wake must wait 1800ms");
+    check(plan[1].delay_after == 2200ms, "pictureoff restore must wait 2200ms after reopening Accessibility");
+    check(plan[2].delay_after == 1000ms, "disable toggle must settle for 1000ms before closing Accessibility");
+    check(plan[3].delay_after == 700ms, "pictureoff restore must allow 700ms for Accessibility to close");
 }
 
 void test_samsung_external_pictureoff_to_on_invalidates_cached_menu_state() {
@@ -359,7 +363,10 @@ void test_samsung_restart_safe_unknown_menu_restore() {
     check_keys(plan, {SamsungRemoteKey::Enter, SamsungRemoteKey::Accessibility,
                       SamsungRemoteKey::Enter, SamsungRemoteKey::Return},
                "unknown menu restore must wake, reopen Accessibility, toggle first item, close");
-    check(plan[1].delay_after == 1400ms, "reopened Accessibility must wait 1400ms");
+    check(plan[0].delay_after == 1800ms, "unknown restore wake must wait 1800ms");
+    check(plan[1].delay_after == 2200ms, "reopened Accessibility must wait 2200ms");
+    check(plan[2].delay_after == 1000ms, "unknown restore toggle must settle for 1000ms");
+    check(plan[3].delay_after == 700ms, "unknown restore must allow 700ms for Accessibility to close");
 }
 
 void test_samsung_power_toggle_is_state_guarded() {
